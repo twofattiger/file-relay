@@ -1,0 +1,18 @@
+# 仅第一次部署需要它：把 worker.js 和这个文件放同一目录，跑一次 `npx wrangler deploy`
+name = "file-relay"
+main = "worker.js"
+compatibility_date = "2026-06-05"
+
+# Durable Object 绑定
+[[durable_objects.bindings]]
+name = "TRANSFER"
+class_name = "TransferSession"
+
+# 这条迁移就是"必须用 wrangler 跑一次"的原因；SQLite 类，免费计划也能用
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TransferSession"]
+
+# 说明：PASSWORD 不写在这里。部署后去 dashboard 的
+# Settings -> Variables and Secrets 添加 PASSWORD（Secret 类型），
+# 或执行一次 `npx wrangler secret put PASSWORD`。
