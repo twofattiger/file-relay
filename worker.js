@@ -182,7 +182,7 @@ const SENDER_HTML =
   "<title>中继站 · 发送</title>" + STYLE +
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span></h1>" +
   "<input id=file type=file>" +
-  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（更快，成功时对端可见你的 IP；不通或不勾则走 CF 中继）</label>" +
+  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
   "<button id=gen disabled>生成传输链接</button>" +
   "<div id=linkbox style='display:none;margin-top:14px'>" +
   "<div class=row><input id=link type=text readonly><button id=copy class=ghost>复制</button></div>" +
@@ -196,7 +196,7 @@ const RECEIVER_HTML =
   "<title>中继站 · 接收</title>" + STYLE +
   "<div class=card><h1>📥 接收文件 <span id=badge class=badge></span></h1>" +
   "<div id=info class=info></div>" +
-  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（更快，成功时对端可见你的 IP；不通或不勾则走 CF 中继）</label>" +
+  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
   "<button id=save disabled>选择保存位置并接收</button>" +
   "<div class=barwrap><div id=bar></div></div>" +
   "<div id=status>连接中...</div></div>" +
