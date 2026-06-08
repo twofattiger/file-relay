@@ -28,6 +28,10 @@ const RTC_CHUNK_SIZE = 256 * 1024;    // 256 KiB (WebRTC DataChannel)
 const WINDOW_BYTES = 8 * 1024 * 1024; // 8 MiB 滑动窗口
 const ACK_EVERY = 4 * 1024 * 1024;    // 4 MiB 确认一次
 const SESSION_TTL = 86400;
+const STUN_SERVERS = [
+  "stun:stun.cloudflare.com:3478",
+  "stun:stun.l.google.com:19302",
+];
 
 export default {
   async fetch(request, env) {
@@ -209,7 +213,7 @@ function FMT_JS() {
 function SENDER_JS() {
   return FMT_JS() + `
 var WS_CHUNK = ${WS_CHUNK_SIZE}, RTC_CHUNK = ${RTC_CHUNK_SIZE}, WINDOW = ${WINDOW_BYTES};
-var ICE = [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
+var ICE = ${JSON.stringify(STUN_SERVERS.map(u => ({ urls: u })))};
 var CHUNK = WS_CHUNK;
 var ws = null, rtc = null, dc = null, transport = 'ws';
 var file = null, id = null, t0 = 0, done = false;
@@ -382,7 +386,7 @@ function cleanup() { try { if (ws) ws.close(); } catch (e) {} try { if (rtc) rtc
 function RECEIVER_JS() {
   return FMT_JS() + `
 var ACKEVERY = ${ACK_EVERY};
-var ICE = [{ urls: 'stun:stun.cloudflare.com:3478' }, { urls: 'stun:stun.l.google.com:19302' }];
+var ICE = ${JSON.stringify(STUN_SERVERS.map(u => ({ urls: u })))};
 var id = location.pathname.split('/')[2];
 var ws = null, rtc = null, dc = null, transport = 'ws';
 var meta = null, writable = null, useMem = false, chunks = [], writeChain = Promise.resolve();
