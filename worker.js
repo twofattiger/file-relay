@@ -4,22 +4,10 @@
 //   TransferSession DO: 按 transfer id 配对 sender/receiver，并作为 WebRTC 信令通道
 //   ENV PASSWORD      : 登录密码（环境变量/Secret）
 //
-// 连接策略：接收方打开链接 -> 发送方发起 WebRTC 打洞（CF DO 作为信令）
-//           打洞成功 -> P2P 直传；超时/失败 -> 回退到 ws 经 CF 中继
+// 连接策略：接收方打开链接 -> 双方交换偏好(prefs) ->
+//   两端都勾选"优先 P2P" 才尝试 WebRTC 打洞（成功直传，失败回退 CF 中继）；
+//   任一端不勾 -> 直接 CF 中继，完全不走 WebRTC。
 // 仅需一次 `npx wrangler deploy`（建立 DO 迁移），之后改代码/环境变量都可在 dashboard 完成。
-// 仅用公共 STUN（无需自建），无 TURN：硬 NAT 场景自动回退到 CF 中继。
-//
-// 协议（peer<->peer，ws 模式下 DO 原样转发；webrtc 模式下走 DataChannel）:
-//   sender->receiver  {type:"meta", name, size, mime, chunkSize}
-//   sender->receiver  <binary chunk>
-//   sender->receiver  {type:"eof"}
-//   receiver->sender  {type:"ready"}
-//   receiver->sender  {type:"ack", bytes}
-//   receiver->sender  {type:"complete"}
-// 信令（始终走 ws/DO）:
-//   {type:"webrtc-offer", sdp} {type:"webrtc-answer", sdp} {type:"webrtc-ice", candidate}
-// DO 生命周期消息（DO->client）:
-//   {type:"role",role} {type:"peer-joined"} {type:"peer-closed"} {type:"error",message}
 // ============================================================
 
 import { DurableObject } from "cloudflare:workers";
@@ -28,6 +16,8 @@ const RTC_CHUNK_SIZE = 256 * 1024;    // 256 KiB (WebRTC DataChannel)
 const WINDOW_BYTES = 8 * 1024 * 1024; // 8 MiB 滑动窗口
 const ACK_EVERY = 4 * 1024 * 1024;    // 4 MiB 确认一次
 const SESSION_TTL = 86400;
+
+// STUN 服务器列表(地址发现)。以后改这里即可,无需进函数体。
 const STUN_SERVERS = [
   "stun:stun.cloudflare.com:3478",
   "stun:stun.l.google.com:19302",
@@ -86,6 +76,7 @@ export class TransferSession extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
+  // prefs / webrtc-* / meta / 二进制等所有消息一律原样转发给对端
   async webSocketMessage(ws, message) {
     const isSender = this.state.getTags(ws).includes("s");
     const targets = this.state.getWebSockets(isSender ? "r" : "s");
@@ -163,6 +154,9 @@ const STYLE =
   "#bar{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .15s}" +
   ".hint{font-size:12px;color:#6b7280;margin-top:10px}" +
   ".info{background:#0f1115;border:1px solid #2c3340;border-radius:9px;padding:12px;margin-bottom:14px;font-size:14px;display:none}" +
+  ".opt{display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:13px;color:#9aa4b2;cursor:pointer;user-select:none}" +
+  ".opt input{width:16px;height:16px;margin:0;accent-color:#3b82f6;cursor:pointer;flex:none}" +
+  ".opt input:disabled{cursor:not-allowed;opacity:.5}" +
   ".badge{display:none;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:#262b36;color:#9aa4b2;border:1px solid #2c3340}" +
   ".badge.p2p{background:#064e3b;color:#34d399;border-color:#065f46}" +
   ".badge.relay{background:#1e293b;color:#60a5fa;border-color:#1e40af}" +
@@ -188,6 +182,7 @@ const SENDER_HTML =
   "<title>中继站 · 发送</title>" + STYLE +
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span></h1>" +
   "<input id=file type=file>" +
+  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
   "<button id=gen disabled>生成传输链接</button>" +
   "<div id=linkbox style='display:none;margin-top:14px'>" +
   "<div class=row><input id=link type=text readonly><button id=copy class=ghost>复制</button></div>" +
@@ -201,6 +196,7 @@ const RECEIVER_HTML =
   "<title>中继站 · 接收</title>" + STYLE +
   "<div class=card><h1>📥 接收文件 <span id=badge class=badge></span></h1>" +
   "<div id=info class=info></div>" +
+  "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
   "<button id=save disabled>选择保存位置并接收</button>" +
   "<div class=barwrap><div id=bar></div></div>" +
   "<div id=status>连接中...</div></div>" +
@@ -213,13 +209,14 @@ function FMT_JS() {
 function SENDER_JS() {
   return FMT_JS() + `
 var WS_CHUNK = ${WS_CHUNK_SIZE}, RTC_CHUNK = ${RTC_CHUNK_SIZE}, WINDOW = ${WINDOW_BYTES};
-var ICE = ${JSON.stringify(STUN_SERVERS.map(u => ({ urls: u })))};
+var ICE = ${JSON.stringify(STUN_SERVERS.map(function(u){return {urls:u};}))};
 var CHUNK = WS_CHUNK;
 var ws = null, rtc = null, dc = null, transport = 'ws';
 var file = null, id = null, t0 = 0, done = false;
 var sent = 0, acked = 0, offset = 0, eofSent = false, metaSent = false, started = false, pumping = false, rerun = false;
 var rtcTimeout = null, remoteSet = false, pendingIce = [];
-var fileEl = document.getElementById('file'), genEl = document.getElementById('gen');
+var peerP2P = true, prefsTimer = null, decided = false, negotiating = false; // 对端默认想要 P2P；prefs 到达后修正
+var fileEl = document.getElementById('file'), genEl = document.getElementById('gen'), p2pEl = document.getElementById('p2p');
 var st = document.getElementById('status'), bar = document.getElementById('bar'), badge = document.getElementById('badge');
 var linkbox = document.getElementById('linkbox'), linkEl = document.getElementById('link');
 
@@ -247,7 +244,8 @@ function reset() {
   if (done) return;
   offset = 0; sent = 0; acked = 0; eofSent = false; metaSent = false; started = false; bar.style.width = '0%';
   transport = 'ws'; CHUNK = WS_CHUNK; remoteSet = false; pendingIce = [];
-  clearTimeout(rtcTimeout);
+  decided = false; negotiating = false; peerP2P = true;
+  clearTimeout(rtcTimeout); clearTimeout(prefsTimer);
   if (rtc) { try { rtc.close(); } catch (e) {} rtc = null; dc = null; }
   setBadge('pending');
 }
@@ -262,7 +260,13 @@ function connect() {
     if (typeof ev.data !== 'string') return;
     var m = JSON.parse(ev.data);
     if (m.type === 'peer-joined') {
-      if (!metaSent && !started) initWebRTC();
+      if (!metaSent && !started && !negotiating) {
+        negotiating = true;
+        prefsTimer = setTimeout(decideTransport, 3000); // 收不到对端偏好则按当前值决定
+      }
+    } else if (m.type === 'prefs') {
+      peerP2P = !!m.p2p;
+      decideTransport();
     } else if (m.type === 'webrtc-answer') {
       if (rtc) rtc.setRemoteDescription(new RTCSessionDescription(m.sdp)).then(function() { remoteSet = true; flushIce(); }).catch(function(e) { console.error(e); fallbackWS(); });
     } else if (m.type === 'webrtc-ice') {
@@ -279,6 +283,21 @@ function connect() {
       S('错误: ' + (m.message || ''));
     }
   };
+}
+
+// 两端都勾选"优先 P2P" 才尝试打洞；否则直接走 CF 中继，不发起 WebRTC
+function decideTransport() {
+  if (metaSent || started || decided) return;
+  decided = true;
+  clearTimeout(prefsTimer);
+  p2pEl.disabled = true;                  // 锁定复选框，传输中不可改
+  var tryP2P = p2pEl.checked && peerP2P;
+  if (tryP2P) {
+    initWebRTC();
+  } else {
+    S('通过 CF 中继传输...');
+    fallbackWS();
+  }
 }
 
 function addIce(c) {
@@ -386,13 +405,14 @@ function cleanup() { try { if (ws) ws.close(); } catch (e) {} try { if (rtc) rtc
 function RECEIVER_JS() {
   return FMT_JS() + `
 var ACKEVERY = ${ACK_EVERY};
-var ICE = ${JSON.stringify(STUN_SERVERS.map(u => ({ urls: u })))};
+var ICE = ${JSON.stringify(STUN_SERVERS.map(function(u){return {urls:u};}))};
 var id = location.pathname.split('/')[2];
 var ws = null, rtc = null, dc = null, transport = 'ws';
 var meta = null, writable = null, useMem = false, chunks = [], writeChain = Promise.resolve();
 var received = 0, written = 0, lastAck = 0, t0 = 0, finalizing = false;
 var remoteSet = false, pendingIce = [];
-var info = document.getElementById('info'), save = document.getElementById('save');
+var prefsSent = false;
+var info = document.getElementById('info'), save = document.getElementById('save'), p2pEl = document.getElementById('p2p');
 var st = document.getElementById('status'), bar = document.getElementById('bar'), badge = document.getElementById('badge');
 
 function S(s) { st.textContent = s; }
@@ -413,8 +433,18 @@ function connect() {
   ws.onmessage = function(ev) {
     if (typeof ev.data === 'string') {
       var m = JSON.parse(ev.data);
-      if (m.type === 'peer-joined') { S('发送方在线，正在协商连接...'); setBadge('pending'); }
-      else if (m.type === 'webrtc-offer') { handleWebRTCOffer(m.sdp); }
+      if (m.type === 'peer-joined') {
+        S('发送方在线，正在协商连接...'); setBadge('pending');
+        if (!prefsSent) {                 // 把本端"是否优先 P2P"告知发送方，并锁定复选框
+          prefsSent = true;
+          p2pEl.disabled = true;
+          if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'prefs', p2p: p2pEl.checked }));
+        }
+      }
+      else if (m.type === 'webrtc-offer') {
+        if (!p2pEl.checked) return;       // 本端不勾优先 P2P：拒收 offer，等待中继 meta（双保险）
+        handleWebRTCOffer(m.sdp);
+      }
       else if (m.type === 'webrtc-ice') { addIce(m.candidate); }
       else handleMessage(m, 'ws');
     } else {
