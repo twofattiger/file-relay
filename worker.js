@@ -143,7 +143,7 @@ const STYLE =
   "<style>" +
   "*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e6e6;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}" +
   ".card{width:100%;max-width:520px;background:#171a21;border:1px solid #262b36;border-radius:14px;padding:28px}" +
-  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;gap:8px}input,button{font-size:15px}" +
+  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;gap:8px}input,button{font-size:16px}" +
   "input[type=password],input[type=text]{width:100%;padding:11px 12px;background:#0f1115;border:1px solid #2c3340;border-radius:9px;color:#e6e6e6;margin-bottom:12px}" +
   "input[type=file]{margin-bottom:14px}" +
   "button{cursor:pointer;padding:11px 16px;border:0;border-radius:9px;background:#3b82f6;color:#fff;font-weight:600}" +
@@ -160,10 +160,11 @@ const STYLE =
   ".badge{display:none;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:#262b36;color:#9aa4b2;border:1px solid #2c3340}" +
   ".badge.p2p{background:#064e3b;color:#34d399;border-color:#065f46}" +
   ".badge.relay{background:#1e293b;color:#60a5fa;border-color:#1e40af}" +
+  "@media (max-width:480px){.card{padding:20px}body{padding:10px}}" +
   "</style>";
 
 const LOGIN_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 登录</title>" + STYLE +
   "<div class=card><h1>🔐 输入系统密码</h1>" +
   "<input id=pw type=password placeholder='密码' autofocus>" +
@@ -178,7 +179,7 @@ const LOGIN_HTML =
   "</script>";
 
 const SENDER_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 发送</title>" + STYLE +
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span></h1>" +
   "<input id=file type=file>" +
@@ -192,7 +193,7 @@ const SENDER_HTML =
   "<script>" + SENDER_JS() + "</script>";
 
 const RECEIVER_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 接收</title>" + STYLE +
   "<div class=card><h1>📥 接收文件 <span id=badge class=badge></span></h1>" +
   "<div id=info class=info></div>" +
