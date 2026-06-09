@@ -149,7 +149,7 @@ const STYLE =
   "button{cursor:pointer;padding:11px 16px;border:0;border-radius:9px;background:#3b82f6;color:#fff;font-weight:600}" +
   "button:disabled{opacity:.4;cursor:not-allowed}button.ghost{background:#262b36}" +
   ".row{display:flex;gap:8px}.row input{flex:1;margin-bottom:0}" +
-  "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:20px}" +
+  "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:56px;white-space:pre-line;line-height:1.7}" +
   ".barwrap{height:8px;background:#0f1115;border-radius:6px;overflow:hidden;margin-top:14px;border:1px solid #2c3340}" +
   "#bar{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .15s}" +
   ".hint{font-size:12px;color:#6b7280;margin-top:10px}" +
@@ -204,7 +204,8 @@ const RECEIVER_HTML =
   "<script>" + RECEIVER_JS() + "</script>";
 
 function FMT_JS() {
-  return "function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],i=-1;do{b=b/1024;i++;}while(b>=1024&&i<u.length-1);return b.toFixed(1)+' '+u[i];}";
+  return "function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],i=-1;do{b=b/1024;i++;}while(b>=1024&&i<u.length-1);return b.toFixed(1)+' '+u[i];}" +
+    "function fmtTime(s){s=Math.round(s);if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;if(m<60)return m+'m'+(r?r+'s':'');var h=Math.floor(m/60);m=m%60;return h+'h'+(m?m+'m':'');}";
 }
 
 function SENDER_JS() {
@@ -396,7 +397,8 @@ function prog() {
   var pct = file.size ? Math.floor(sent * 100 / file.size) : 0;
   bar.style.width = pct + '%';
   var sec = (Date.now() - t0) / 1000, sp = sec > 0 ? sent / sec : 0;
-  S((transport === 'webrtc' ? '直传中 ' : '中继中 ') + pct + '%  ' + fmt(sent) + ' / ' + fmt(file.size) + '  (' + fmt(sp) + '/s)');
+  var eta = (sp > 0 && sent < file.size) ? '  剩余约 ' + fmtTime((file.size - sent) / sp) : '';
+  S((transport === 'webrtc' ? '直传中 ' : '中继中 ') + pct + '%\\n' + fmt(sent) + ' / ' + fmt(file.size) + '  (' + fmt(sp) + '/s)\\n已耗时 ' + fmtTime(sec) + eta);
 }
 
 function cleanup() { try { if (ws) ws.close(); } catch (e) {} try { if (rtc) rtc.close(); } catch (e) {} }
@@ -544,7 +546,8 @@ function prog() {
   var pct = meta && meta.size ? Math.floor(received * 100 / meta.size) : 0;
   bar.style.width = pct + '%';
   var sec = (Date.now() - t0) / 1000, sp = sec > 0 ? received / sec : 0;
-  S((transport === 'webrtc' ? '直连接收 ' : '中继接收 ') + pct + '%  ' + fmt(received) + ' / ' + fmt(meta ? meta.size : 0) + '  (' + fmt(sp) + '/s)');
+  var eta = (sp > 0 && meta && received < meta.size) ? '  剩余约 ' + fmtTime((meta.size - received) / sp) : '';
+  S((transport === 'webrtc' ? '直连接收 ' : '中继接收 ') + pct + '%\\n' + fmt(received) + ' / ' + fmt(meta ? meta.size : 0) + '  (' + fmt(sp) + '/s)\\n已耗时 ' + fmtTime(sec) + eta);
 }
 
 async function finalize() {
