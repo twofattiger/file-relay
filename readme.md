@@ -117,9 +117,17 @@ npx wrangler deploy
 3. 在 **Environment Variables** 区域点击 **Add**：
 * **Variable name**: `PASSWORD`
 * **Value**: 输入你自定义的系统登录密码。
-
-
 4. 点击 **Deploy（部署）** 保存。
+
+### 步骤四：绑定自定义域名 (强烈推荐)
+
+> **⚠️ 重要提示**：Cloudflare 默认分配的 `*.workers.dev` 域名在中国大陆地区由于 DNS 污染等原因，通常无法正常访问。为了保证稳定使用，**强烈建议绑定一个托管在 Cloudflare 上的自定义域名**。
+
+1. 在当前 `file-relay` Worker 的管理页面中，切换到顶部的 **Settings（设置）** 选项卡。
+2. 在左侧菜单中选择 **Domains & Routes（域和路由）**。
+3. 点击 **Add（添加）** -> **Custom Domain（自定义域）**。
+4. 输入你已经在 Cloudflare 托管的域名或子域名（例如：`relay.yourdomain.com`），点击添加。
+5. 等待几十秒 DNS 解析生效后，即可使用该自定义域名并配合 HTTPS 稳定访问你的中继站。
 
 ---
 

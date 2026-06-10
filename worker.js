@@ -143,13 +143,13 @@ const STYLE =
   "<style>" +
   "*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e6e6;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}" +
   ".card{width:100%;max-width:520px;background:#171a21;border:1px solid #262b36;border-radius:14px;padding:28px}" +
-  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;gap:8px}input,button{font-size:15px}" +
+  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;gap:8px}input,button{font-size:16px}" +
   "input[type=password],input[type=text]{width:100%;padding:11px 12px;background:#0f1115;border:1px solid #2c3340;border-radius:9px;color:#e6e6e6;margin-bottom:12px}" +
   "input[type=file]{margin-bottom:14px}" +
   "button{cursor:pointer;padding:11px 16px;border:0;border-radius:9px;background:#3b82f6;color:#fff;font-weight:600}" +
   "button:disabled{opacity:.4;cursor:not-allowed}button.ghost{background:#262b36}" +
   ".row{display:flex;gap:8px}.row input{flex:1;margin-bottom:0}" +
-  "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:20px}" +
+  "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:56px;white-space:pre-line;line-height:1.7}" +
   ".barwrap{height:8px;background:#0f1115;border-radius:6px;overflow:hidden;margin-top:14px;border:1px solid #2c3340}" +
   "#bar{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .15s}" +
   ".hint{font-size:12px;color:#6b7280;margin-top:10px}" +
@@ -160,10 +160,11 @@ const STYLE =
   ".badge{display:none;font-size:12px;font-weight:600;padding:3px 10px;border-radius:999px;background:#262b36;color:#9aa4b2;border:1px solid #2c3340}" +
   ".badge.p2p{background:#064e3b;color:#34d399;border-color:#065f46}" +
   ".badge.relay{background:#1e293b;color:#60a5fa;border-color:#1e40af}" +
+  "@media (max-width:480px){.card{padding:20px}body{padding:10px}}" +
   "</style>";
 
 const LOGIN_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 登录</title>" + STYLE +
   "<div class=card><h1>🔐 输入系统密码</h1>" +
   "<input id=pw type=password placeholder='密码' autofocus>" +
@@ -178,7 +179,7 @@ const LOGIN_HTML =
   "</script>";
 
 const SENDER_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 发送</title>" + STYLE +
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span></h1>" +
   "<input id=file type=file>" +
@@ -192,7 +193,7 @@ const SENDER_HTML =
   "<script>" + SENDER_JS() + "</script>";
 
 const RECEIVER_HTML =
-  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>" +
+  "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 接收</title>" + STYLE +
   "<div class=card><h1>📥 接收文件 <span id=badge class=badge></span></h1>" +
   "<div id=info class=info></div>" +
@@ -203,7 +204,8 @@ const RECEIVER_HTML =
   "<script>" + RECEIVER_JS() + "</script>";
 
 function FMT_JS() {
-  return "function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],i=-1;do{b=b/1024;i++;}while(b>=1024&&i<u.length-1);return b.toFixed(1)+' '+u[i];}";
+  return "function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],i=-1;do{b=b/1024;i++;}while(b>=1024&&i<u.length-1);return b.toFixed(1)+' '+u[i];}" +
+    "function fmtTime(s){s=Math.round(s);if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;if(m<60)return m+'m'+(r?r+'s':'');var h=Math.floor(m/60);m=m%60;return h+'h'+(m?m+'m':'');}";
 }
 
 function SENDER_JS() {
@@ -395,7 +397,8 @@ function prog() {
   var pct = file.size ? Math.floor(sent * 100 / file.size) : 0;
   bar.style.width = pct + '%';
   var sec = (Date.now() - t0) / 1000, sp = sec > 0 ? sent / sec : 0;
-  S((transport === 'webrtc' ? '直传中 ' : '中继中 ') + pct + '%  ' + fmt(sent) + ' / ' + fmt(file.size) + '  (' + fmt(sp) + '/s)');
+  var eta = (sp > 0 && sent < file.size) ? '  剩余约 ' + fmtTime((file.size - sent) / sp) : '';
+  S((transport === 'webrtc' ? '直传中 ' : '中继中 ') + pct + '%\\n' + fmt(sent) + ' / ' + fmt(file.size) + '  (' + fmt(sp) + '/s)\\n已耗时 ' + fmtTime(sec) + eta);
 }
 
 function cleanup() { try { if (ws) ws.close(); } catch (e) {} try { if (rtc) rtc.close(); } catch (e) {} }
@@ -543,7 +546,8 @@ function prog() {
   var pct = meta && meta.size ? Math.floor(received * 100 / meta.size) : 0;
   bar.style.width = pct + '%';
   var sec = (Date.now() - t0) / 1000, sp = sec > 0 ? received / sec : 0;
-  S((transport === 'webrtc' ? '直连接收 ' : '中继接收 ') + pct + '%  ' + fmt(received) + ' / ' + fmt(meta ? meta.size : 0) + '  (' + fmt(sp) + '/s)');
+  var eta = (sp > 0 && meta && received < meta.size) ? '  剩余约 ' + fmtTime((meta.size - received) / sp) : '';
+  S((transport === 'webrtc' ? '直连接收 ' : '中继接收 ') + pct + '%\\n' + fmt(received) + ' / ' + fmt(meta ? meta.size : 0) + '  (' + fmt(sp) + '/s)\\n已耗时 ' + fmtTime(sec) + eta);
 }
 
 async function finalize() {
