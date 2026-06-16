@@ -303,13 +303,20 @@ const STYLE =
   ".device{background:#14171e;border:1px solid #262b36;border-radius:12px;padding:14px;margin-top:14px}" +
   ".device .panes{margin-top:0}" +
   ".dev-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}" +
-  ".dev-name{font-weight:600;font-size:15px}" +
+  ".dev-name{font-weight:600;font-size:15px;max-width:40%}" +
   ".dev-conn{margin-left:auto;font-size:12px;padding:3px 10px;border-radius:999px;background:#262b36;color:#9aa4b2;border:1px solid #2c3340}" +
   ".dev-conn.ok{background:#064e3b;color:#34d399;border-color:#065f46}" +
   ".dev-conn.bad{background:#3f1d1d;color:#fca5a5;border-color:#7f1d1d}" +
   ".empty{color:#6b7280;font-size:13px;text-align:center;padding:22px 10px}" +
   "@media (max-width:480px){.card{padding:20px}body{padding:10px}}" +
   "</style>";
+
+const MODAL_HTML =
+  "<div id=modal style='display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:9999;align-items:center;justify-content:center'>" +
+  "<div style='background:#171a21;border:1px solid #2c3340;border-radius:12px;padding:24px;width:280px;text-align:center;box-shadow:0 10px 25px rgba(0,0,0,0.5)'>" +
+  "<div id=mmsg style='margin-bottom:20px;font-size:15px;color:#e6e6e6'></div>" +
+  "<div class=row><button id=mno class=ghost style='flex:1'>取消</button><button id=myes style='flex:1;background:#dc2626'>确定</button></div>" +
+  "</div></div>";
 
 const LOGIN_HTML =
   "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
@@ -365,7 +372,7 @@ const ROOM_HTML =
   "<div style='text-align:center;margin-top:12px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>" +
   "<div class=hint>让其它设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。每加入一台设备会在下方出现一张卡片，可与其双向互发文件。</div></div>" +
   "<div id=devices></div>" +
-  "<div id=status></div></div>" +
+  "<div id=status></div></div>" + MODAL_HTML +
   "<script>" + ROOM_JS() + "</script>";
 
 const SENDER_HTML =
@@ -375,13 +382,13 @@ const SENDER_HTML =
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span><a class=back href='/'>返回</a></h1>" +
   "<input id=file type=file>" +
   "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
-  "<button id=gen disabled>生成传输链接</button>" +
-  "<div id=linkbox style='display:none;margin-top:14px'>" +
+  "<div class=row style='margin-bottom:14px'><button id=gen disabled style='flex:1'>生成传输链接</button><button id=cancel class=ghost style='display:none;flex:none'>取消</button></div>" +
+  "<div id=linkbox style='display:none'>" +
   "<div class=row><input id=link type=text readonly><button id=copy class=ghost>复制</button></div>" +
   "<div style='text-align:center;margin-top:14px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>" +
   "<div class=hint>把链接发给对方，或让对方直接扫描上方二维码，对方打开并选择保存位置后开始实时传输（双方需保持页面打开）</div></div>" +
   "<div class=barwrap><div id=bar></div></div>" +
-  "<div id=status></div></div>" +
+  "<div id=status></div></div>" + MODAL_HTML +
   "<script>" + SENDER_JS() + "</script>";
 
 const RECEIVER_HTML =
@@ -390,14 +397,18 @@ const RECEIVER_HTML =
   "<div class=card><h1>📥 接收文件 <span id=badge class=badge></span></h1>" +
   "<div id=info class=info></div>" +
   "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
-  "<button id=save disabled>选择保存位置并接收</button>" +
+  "<div class=row style='margin-bottom:14px'><button id=save disabled style='flex:1'>选择保存位置并接收</button><button id=cancel class=ghost style='display:none;flex:none'>取消</button></div>" +
   "<div class=barwrap><div id=bar></div></div>" +
-  "<div id=status>连接中...</div></div>" +
+  "<div id=status>连接中...</div></div>" + MODAL_HTML +
   "<script>" + RECEIVER_JS() + "</script>";
 
 function FMT_JS() {
   return "function fmt(b){if(b<1024)return b+' B';var u=['KB','MB','GB','TB'],i=-1;do{b=b/1024;i++;}while(b>=1024&&i<u.length-1);return b.toFixed(1)+' '+u[i];}" +
-    "function fmtTime(s){s=Math.round(s);if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;if(m<60)return m+'m'+(r?r+'s':'');var h=Math.floor(m/60);m=m%60;return h+'h'+(m?m+'m':'');}";
+    "function fmtTime(s){s=Math.round(s);if(s<60)return s+'s';var m=Math.floor(s/60),r=s%60;if(m<60)return m+'m'+(r?r+'s':'');var h=Math.floor(m/60);m=m%60;return h+'h'+(m?m+'m':'');}" +
+    "var mdl=document.getElementById('modal'),mmsg=document.getElementById('mmsg'),mno=document.getElementById('mno'),myes=document.getElementById('myes'),mok=null;" +
+    "if(mno) mno.onclick=function(){ mdl.style.display='none'; };" +
+    "if(myes) myes.onclick=function(){ mdl.style.display='none'; if(mok)mok(); mok=null; };" +
+    "function uiConfirm(msg, cb) { if(!mdl){ if(confirm(msg))cb(); return; } mmsg.textContent=msg; mok=cb; mdl.style.display='flex'; }";
 }
 
 function SENDER_JS() {
@@ -413,6 +424,21 @@ var peerP2P = true, prefsTimer = null, decided = false, negotiating = false; // 
 var fileEl = document.getElementById('file'), genEl = document.getElementById('gen'), p2pEl = document.getElementById('p2p');
 var st = document.getElementById('status'), bar = document.getElementById('bar'), badge = document.getElementById('badge');
 var linkbox = document.getElementById('linkbox'), linkEl = document.getElementById('link');
+var cancelEl = document.getElementById('cancel');
+
+cancelEl.onclick = function() {
+  uiConfirm('确定要取消当前传输吗？', function() {
+    sendMsg(JSON.stringify({ type: 'cancel' }));
+    doCancel('已取消，等待对方重新接收...');
+  });
+};
+
+function doCancel(msg) {
+  started = false; pumping = false; rerun = false;
+  offset = 0; sent = 0; acked = 0; eofSent = false; bar.style.width = '0%';
+  cancelEl.style.display = 'none';
+  S(msg);
+}
 
 function S(s) { st.textContent = s; }
 function setBadge(t) {
@@ -448,6 +474,7 @@ function reset() {
   offset = 0; sent = 0; acked = 0; eofSent = false; metaSent = false; started = false; bar.style.width = '0%';
   transport = 'ws'; CHUNK = WS_CHUNK; remoteSet = false; pendingIce = [];
   decided = false; negotiating = false; peerP2P = true;
+  cancelEl.style.display = 'none';
   clearTimeout(rtcTimeout); clearTimeout(prefsTimer);
   if (rtc) { try { rtc.close(); } catch (e) {} rtc = null; dc = null; }
   setBadge('pending');
@@ -475,11 +502,13 @@ function connect() {
     } else if (m.type === 'webrtc-ice') {
       addIce(m.candidate);
     } else if (m.type === 'ready') {
-      started = true; t0 = Date.now(); S(transport === 'webrtc' ? '正在直传...' : '正在中继传输...'); pump();
+      started = true; t0 = Date.now(); S(transport === 'webrtc' ? '正在直传...' : '正在中继传输...'); cancelEl.style.display = 'inline-block'; pump();
     } else if (m.type === 'ack') {
       acked = m.bytes; pump();
     } else if (m.type === 'complete') {
-      done = true; bar.style.width = '100%'; S('传输完成 ✓'); cleanup();
+      done = true; bar.style.width = '100%'; S('传输完成 ✓'); cancelEl.style.display = 'none'; cleanup();
+    } else if (m.type === 'cancel') {
+      doCancel('对方已取消接收，等待对方重新接收...');
     } else if (m.type === 'peer-closed') {
       if (!done) { S('对方已断开，等待重新连接...'); reset(); }
     } else if (m.type === 'error') {
@@ -532,9 +561,10 @@ function initWebRTC() {
     dc.onmessage = function(ev) {
       if (typeof ev.data !== 'string') return;
       var m = JSON.parse(ev.data);
-      if (m.type === 'ready') { started = true; t0 = Date.now(); S('正在直传...'); pump(); }
+      if (m.type === 'ready') { started = true; t0 = Date.now(); S('正在直传...'); cancelEl.style.display = 'inline-block'; pump(); }
       else if (m.type === 'ack') { acked = m.bytes; pump(); }
-      else if (m.type === 'complete') { done = true; bar.style.width = '100%'; S('传输完成 ✓'); cleanup(); }
+      else if (m.type === 'complete') { done = true; bar.style.width = '100%'; S('传输完成 ✓'); cancelEl.style.display = 'none'; cleanup(); }
+      else if (m.type === 'cancel') { doCancel('对方已取消接收，等待对方重新接收...'); }
     };
     rtc.onicecandidate = function(ev) {
       if (ev.candidate && ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'webrtc-ice', candidate: ev.candidate }));
@@ -581,17 +611,18 @@ async function pump() {
   pumping = true;
   do {
     rerun = false;
-    while (offset < file.size && (sent - acked) < WINDOW && (transport !== 'webrtc' || !dc || dc.bufferedAmount < WINDOW)) {
+    while (started && offset < file.size && (sent - acked) < WINDOW && (transport !== 'webrtc' || !dc || dc.bufferedAmount < WINDOW)) {
       var end = Math.min(offset + CHUNK, file.size);
       var buf = await file.slice(offset, end).arrayBuffer();
+      if (!started || (transport !== 'webrtc' && ws && ws.readyState !== 1)) { pumping = false; return; }
       sendMsg(buf);
       sent += buf.byteLength;
       offset = end;
       prog();
     }
-  } while (rerun);
+  } while (rerun && started);
   pumping = false;
-  if (offset >= file.size && !eofSent) { sendMsg(JSON.stringify({ type: 'eof' })); eofSent = true; }
+  if (started && offset >= file.size && !eofSent) { sendMsg(JSON.stringify({ type: 'eof' })); eofSent = true; }
 }
 
 function prog() {
@@ -618,6 +649,24 @@ var remoteSet = false, pendingIce = [];
 var prefsSent = false;
 var info = document.getElementById('info'), save = document.getElementById('save'), p2pEl = document.getElementById('p2p');
 var st = document.getElementById('status'), bar = document.getElementById('bar'), badge = document.getElementById('badge');
+var cancelEl = document.getElementById('cancel');
+
+cancelEl.onclick = function() {
+  uiConfirm('确定要取消当前传输吗？', function() {
+    sendMsg(JSON.stringify({ type: 'cancel' }));
+    doCancel('已取消接收。您可以重新点击保存接收。');
+  });
+};
+
+async function doCancel(msg) {
+  finalizing = false;
+  if (writable) { try { await writable.abort(); } catch(e){} writable = null; }
+  chunks = []; writeChain = Promise.resolve(); received = 0; written = 0; lastAck = 0;
+  bar.style.width = '0%';
+  cancelEl.style.display = 'none';
+  save.disabled = false;
+  S(msg);
+}
 
 function S(s) { st.textContent = s; }
 function setBadge(t) {
@@ -697,11 +746,18 @@ function handleMessage(m, source) {
     info.style.display = 'block';
     info.textContent = '文件: ' + m.name + '  (' + fmt(m.size) + ')';
     save.disabled = false;
+    cancelEl.style.display = 'inline-block';
     S('点击下方按钮选择保存位置 [' + (source === 'webrtc' ? 'P2P 直连' : 'CF 中继') + ']');
   }
   else if (m.type === 'eof') { finalize(); }
-  else if (m.type === 'peer-closed') { if (!finalizing) S('发送方已断开'); }
+  else if (m.type === 'peer-closed') { 
+    if (!finalizing) {
+      if (cancelEl.style.display !== 'none') doCancel('发送方已断开');
+      else S('发送方已断开');
+    }
+  }
   else if (m.type === 'error') { S('错误: ' + (m.message || '')); }
+  else if (m.type === 'cancel') { doCancel('发送方取消了传输。您可以重新点击保存接收。'); }
 }
 
 function sendMsg(data) {
@@ -723,6 +779,7 @@ save.onclick = async function() {
     useMem = true;
   }
   save.disabled = true; t0 = Date.now();
+  cancelEl.style.display = 'inline-block';
   sendMsg(JSON.stringify({ type: 'ready' }));
   S(useMem ? '内存接收中(大文件慎用)...' : (transport === 'webrtc' ? '开始直连接收...' : '开始中继接收...'));
 };
@@ -754,6 +811,7 @@ function prog() {
 async function finalize() {
   if (finalizing) return;
   finalizing = true;
+  cancelEl.style.display = 'none';
   await writeChain;
   sendMsg(JSON.stringify({ type: 'ack', bytes: written }));
   if (writable) {
@@ -1042,10 +1100,13 @@ function buildCard(pr) {
   // 发送
   var sp = document.createElement('div'); sp.className = 'pane'; sp.innerHTML = '<h3>📤 发送</h3>';
   var file = document.createElement('input'); file.type = 'file';
-  var btn = document.createElement('button'); btn.textContent = '发送'; btn.disabled = true;
+  var btnRow = document.createElement('div'); btnRow.className = 'row';
+  var btn = document.createElement('button'); btn.textContent = '发送'; btn.disabled = true; btn.style.flex = '1';
+  var scancel = document.createElement('button'); scancel.className = 'ghost'; scancel.textContent = '取消'; scancel.style.display = 'none'; scancel.style.flex = 'none';
+  btnRow.appendChild(btn); btnRow.appendChild(scancel);
   var sw = document.createElement('div'); sw.className = 'barwrap'; var sb = document.createElement('div'); sb.className = 'pbar'; sw.appendChild(sb);
   var ss = document.createElement('div'); ss.className = 'substat';
-  sp.appendChild(file); sp.appendChild(btn); sp.appendChild(sw); sp.appendChild(ss);
+  sp.appendChild(file); sp.appendChild(btnRow); sp.appendChild(sw); sp.appendChild(ss);
   // 接收
   var rp = document.createElement('div'); rp.className = 'pane'; rp.innerHTML = '<h3>📥 接收</h3>';
   var rl = document.createElement('div');
@@ -1054,10 +1115,38 @@ function buildCard(pr) {
   rp.appendChild(rl); rp.appendChild(rw); rp.appendChild(rs);
   panes.appendChild(sp); panes.appendChild(rp);
   root.appendChild(head); root.appendChild(panes);
-  pr.els = { root: root, name: nm, conn: cn, file: file, btn: btn, sbar: sb, sstat: ss, rlist: rl, rbar: rb, rstat: rs };
+  pr.els = { root: root, name: nm, conn: cn, file: file, btn: btn, scancel: scancel, sbar: sb, sstat: ss, rlist: rl, rbar: rb, rstat: rs };
   file.onchange = function() { refreshSendBtn(pr); };
   btn.onclick = function() { startSend(pr); };
+  scancel.onclick = function() {
+    uiConfirm('确定要取消发送吗？', function() {
+      cancelSend(pr, '已取消发送。');
+    });
+  };
   setName(pr); setConn(pr, '连接中…', '');
+}
+
+function cancelSend(pr, msg) {
+  var c = pr.sendCtx; if (!c) return;
+  c.canceled = true; c.pumping = false;
+  pctrl(pr, { type: 'rcancel', tid: c.tid });
+  pr.sendCtx = null;
+  pr.els.scancel.style.display = 'none';
+  pr.els.file.disabled = false;
+  pr.els.sbar.style.width = '0%';
+  pr.els.sstat.textContent = msg;
+  refreshSendBtn(pr);
+}
+
+async function cancelRecv(pr, msg) {
+  var c = pr.recvCtx; if (!c) return;
+  pctrl(pr, { type: 'rcancel', tid: c.tid });
+  c.finalizing = false;
+  if (c.writable) { try { await c.writable.abort(); } catch(e){} c.writable = null; }
+  pr.recvCtx = null;
+  pr.els.rlist.innerHTML = '';
+  pr.els.rbar.style.width = '0%';
+  pr.els.rstat.textContent = msg;
 }
 function setName(pr) { if (pr.els) pr.els.name.textContent = pr.name || '未命名设备'; }
 function setConn(pr, text, cls) { if (pr.els) { pr.els.conn.textContent = text; pr.els.conn.className = 'dev-conn' + (cls ? ' ' + cls : ''); } }
@@ -1072,8 +1161,9 @@ function pctrl(pr, obj) { pSend(pr, JSON.stringify(obj)); }
 function startSend(pr) {
   var f = pr.els.file.files[0];
   if (!f || pr.sendCtx || !pr.ready) return;
-  pr.sendCtx = { file: f, tid: uuid(), sent: 0, acked: 0, offset: 0, eof: false, t0: 0, pumping: false, rerun: false };
+  pr.sendCtx = { file: f, tid: uuid(), sent: 0, acked: 0, offset: 0, eof: false, t0: 0, pumping: false, rerun: false, canceled: false };
   pr.els.btn.disabled = true; pr.els.file.disabled = true; pr.els.sbar.style.width = '0%';
+  pr.els.scancel.style.display = 'inline-block';
   pr.els.sstat.textContent = '已请求发送 ' + f.name + '，等待对方确认接收…';
   pctrl(pr, { type: 'rmeta', tid: pr.sendCtx.tid, name: f.name, size: f.size, mime: f.type || 'application/octet-stream' });
 }
@@ -1086,14 +1176,15 @@ async function pumpSend(pr) {
   do {
     c.rerun = false;
     while (c.offset < c.file.size && (c.sent - c.acked) < WINDOW && chBuffered(pr) < WINDOW) {
+      if (c.canceled || pr.sendCtx !== c || !chOpen(pr)) { c.pumping = false; return; }
       var end = Math.min(c.offset + pr.chunk, c.file.size);
       var buf = await c.file.slice(c.offset, end).arrayBuffer();
-      if (pr.sendCtx !== c || !chOpen(pr)) { c.pumping = false; return; }
+      if (c.canceled || pr.sendCtx !== c || !chOpen(pr)) { c.pumping = false; return; }
       pSend(pr, buf); c.sent += buf.byteLength; c.offset = end; sendProg(pr);
     }
   } while (c.rerun);
   c.pumping = false;
-  if (c.offset >= c.file.size && !c.eof) { c.eof = true; pctrl(pr, { type: 'reof', tid: c.tid }); }
+  if (!c.canceled && c.offset >= c.file.size && !c.eof) { c.eof = true; pctrl(pr, { type: 'reof', tid: c.tid }); }
 }
 function sendProg(pr) {
   var c = pr.sendCtx; if (!c) return;
@@ -1106,7 +1197,7 @@ function onSendDone(pr, m) {
   var c = pr.sendCtx; if (!c || m.tid !== c.tid) return;
   pr.els.sbar.style.width = '100%';
   pr.els.sstat.textContent = '已发送完成 ✓  ' + c.file.name;
-  pr.sendCtx = null; pr.els.file.disabled = false; pr.els.file.value = ''; refreshSendBtn(pr);
+  pr.sendCtx = null; pr.els.scancel.style.display = 'none'; pr.els.file.disabled = false; pr.els.file.value = ''; refreshSendBtn(pr);
 }
 
 /* ---------------- 接收（每设备） ---------------- */
@@ -1117,26 +1208,60 @@ function onCtrl(pr, m) {
     case 'rack': onAck(pr, m); break;
     case 'reof': onRecvEof(pr, m); break;
     case 'rdone': onSendDone(pr, m); break;
+    case 'rcancel': onCancel(pr, m); break;
   }
 }
+
+async function onCancel(pr, m) {
+  var sc = pr.sendCtx;
+  if (sc && m.tid === sc.tid) {
+    sc.canceled = true; sc.pumping = false;
+    pr.sendCtx = null;
+    pr.els.scancel.style.display = 'none';
+    pr.els.file.disabled = false;
+    pr.els.sbar.style.width = '0%';
+    pr.els.sstat.textContent = '对方取消了接收。';
+    refreshSendBtn(pr);
+    return;
+  }
+  var rc = pr.recvCtx;
+  if (rc && m.tid === rc.tid) {
+    rc.finalizing = false;
+    if (rc.writable) { try { await rc.writable.abort(); } catch(e){} rc.writable = null; }
+    pr.recvCtx = null;
+    pr.els.rlist.innerHTML = '';
+    pr.els.rbar.style.width = '0%';
+    pr.els.rstat.textContent = '对方取消了发送。';
+  }
+}
+
 function startRecv(pr, m) {
   if (pr.recvCtx) return;       // 串行：对端一次发一个
   pr.recvCtx = { tid: m.tid, meta: m, writable: null, useMem: false, chunks: [], writeChain: Promise.resolve(), received: 0, written: 0, lastAck: 0, t0: 0, finalizing: false };
   pr.els.rbar.style.width = '0%'; pr.els.rlist.innerHTML = '';
   var box = document.createElement('div'); box.className = 'recvitem';
   var info = document.createElement('div'); info.innerHTML = '收到文件：' + escapeHtml(m.name) + '  (' + fmt(m.size) + ')';
-  var b = document.createElement('button'); b.className = 'ghost'; b.textContent = '保存接收';
-  b.onclick = function() { acceptRecv(pr, b); };
-  box.appendChild(info); box.appendChild(b); pr.els.rlist.appendChild(box);
+  var bRow = document.createElement('div'); bRow.className = 'row';
+  var b = document.createElement('button'); b.className = 'ghost'; b.textContent = '保存接收'; b.style.flex = '1';
+  var rcancel = document.createElement('button'); rcancel.className = 'ghost'; rcancel.textContent = '取消'; rcancel.style.flex = 'none';
+  bRow.appendChild(b); bRow.appendChild(rcancel);
+  b.onclick = function() { acceptRecv(pr, b, rcancel); };
+  rcancel.onclick = function() {
+    uiConfirm('确定要取消接收吗？', function() {
+      cancelRecv(pr, '已取消接收。您可以等待对方重新发送。');
+    });
+  };
+  box.appendChild(info); box.appendChild(bRow); pr.els.rlist.appendChild(box);
   pr.els.rstat.textContent = '对方请求发送文件，点击「保存接收」开始';
 }
-async function acceptRecv(pr, b) {
+async function acceptRecv(pr, b, rcancel) {
   var c = pr.recvCtx; if (!c) return;
   b.disabled = true;
   if (window.showSaveFilePicker) {
     try { var h = await showSaveFilePicker({ suggestedName: c.meta.name }); c.writable = await h.createWritable(); }
     catch (e) { if (e && e.name === 'AbortError') { b.disabled = false; return; } c.useMem = true; }
   } else { c.useMem = true; }
+  if (pr.recvCtx !== c) return;
   c.t0 = Date.now();
   pctrl(pr, { type: 'rready', tid: c.tid });
   pr.els.rstat.textContent = c.useMem ? '内存接收中(大文件慎用)…' : '接收中…';
