@@ -63,7 +63,7 @@ export class TransferSession extends DurableObject {
     const dup = new WebSocketPair();
     dup[1].accept();
     try { dup[1].send(JSON.stringify({ type: "error", message })); } catch (e) {}
-    dup[1].close(1008, "rejected");
+    dup[1].close(1000, "rejected");   // 用正常关闭码，避免客户端 onerror 覆盖掉具体错误文案
     return new Response(null, { status: 101, webSocket: dup[0] });
   }
 
@@ -96,6 +96,9 @@ export class TransferSession extends DurableObject {
       role = want === "sender" ? "sender" : "receiver";
       tag = role === "sender" ? "s" : "r";
       if (this.state.getWebSockets(tag).length >= 1) return this.reject("该角色已有连接");
+      // 方式1：transfer id 由发送方创建并先占用 s 槽位，再把 /r/{id} 发出。
+      // 接收方连入时若没有发送方在线，说明链接无效或发送方已离开，直接拒绝而非凭空建会话。
+      if (role === "receiver" && this.state.getWebSockets("s").length === 0) return this.reject("链接无效，或发送方不在线/已离开");
     }
 
     const pair = new WebSocketPair();
@@ -271,7 +274,8 @@ const ROOM_HTML =
   "<div class=roomtop>" +
   "<div class=row><input id=rlink type=text readonly><button id=rcopy class=ghost>复制</button></div>" +
   "<div style='text-align:center;margin-top:12px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>" +
-  "<div class=hint>让另一台设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。</div></div>" +
+  "<div class=hint>让另一台设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。</div>" +
+  "<label class=opt style='margin:12px 0 0'><input id=rp2p type=checkbox checked> ⚡ 优先 P2P 直连（两端都勾选才尝试点对点直传，否则走服务端中继）</label></div>" +
   "<div class=panes>" +
   "<div class=pane><h2>📤 发送给对方</h2>" +
   "<input id=rfile type=file>" +
@@ -702,11 +706,16 @@ connect();
 // ============================================================
 function ROOM_JS() {
   return FMT_JS() + `
-var WS_CHUNK = ${WS_CHUNK_SIZE}, WINDOW = ${WINDOW_BYTES}, ACKEVERY = ${ACK_EVERY};
+var WS_CHUNK = ${WS_CHUNK_SIZE}, RTC_CHUNK = ${RTC_CHUNK_SIZE}, WINDOW = ${WINDOW_BYTES}, ACKEVERY = ${ACK_EVERY};
+var ICE = ${JSON.stringify(STUN_SERVERS.map(function(u){return {urls:u};}))};
 var pass = location.pathname.split('/')[2] || '';
 var id = pass;                       // 房间 id 即密码（DO idFromName）
 var cid = roomCid();                 // 本端稳定标识：刷新/重连复用同一槽位，不被当作第三台设备
 var ws = null, peerOnline = false;
+var myRole = null;                   // DO 分配的槽位角色：sender(s) 作为 WebRTC 发起方，receiver(r) 应答
+var transport = 'ws', CHUNK = WS_CHUNK;   // 当前文件通道：'ws'(CF 中继) | 'webrtc'(P2P 直连)
+var rtc = null, dc = null, remoteSet = false, pendingIce = [];
+var peerP2P = true, prefsSent = false, decided = false, negTimer = null, rtcTimeout = null;
 
 // 客户端 id 存 sessionStorage：同标签刷新保留(=重连)，关闭标签即弃
 function roomCid() {
@@ -722,20 +731,25 @@ var sendCtx = null, recvCtx = null;  // 同一时刻各最多一个
 var fileEl = document.getElementById('rfile'), sendBtn = document.getElementById('rsend');
 var sbar = document.getElementById('sbar'), sstat = document.getElementById('sstat');
 var rlist = document.getElementById('rlist'), rbar = document.getElementById('rbar'), rstat = document.getElementById('rstat');
-var linkEl = document.getElementById('rlink');
+var linkEl = document.getElementById('rlink'), p2pEl = document.getElementById('rp2p');
 var stat = document.getElementById('status'), badge = document.getElementById('badge');
 
 function S(s) { stat.textContent = s; }
-function setBadge(on) { badge.textContent = on ? '对方在线' : '等待对方'; badge.className = 'badge ' + (on ? 'p2p' : ''); badge.style.display = 'inline-block'; }
+function setBadge(state) {
+  var map = { wait: ['等待对方', ''], pending: ['协商中…', ''], webrtc: ['P2P 直连', 'p2p'], ws: ['CF 中继', 'relay'] };
+  var v = map[state] || map.wait;
+  badge.textContent = v[0]; badge.className = 'badge' + (v[1] ? ' ' + v[1] : ''); badge.style.display = 'inline-block';
+}
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-function wsSend(d) { if (ws && ws.readyState === 1) ws.send(d); }
+function wsSend(d) { if (ws && ws.readyState === 1) ws.send(d); }                 // 信令始终走 WS
+function sendMsg(d) { if (transport === 'webrtc' && dc && dc.readyState === 'open') dc.send(d); else wsSend(d); } // 文件数据走当前通道
 function refreshSendBtn() { sendBtn.disabled = !(fileEl.files.length && peerOnline) || !!sendCtx; }
 
 // 顶部：链接 / 复制 / 二维码
 linkEl.value = location.origin + '/m/' + pass;
 document.getElementById('rcopy').onclick = function() { linkEl.select(); if (navigator.clipboard) navigator.clipboard.writeText(linkEl.value); };
 try { new QRious({ element: document.getElementById('qr'), value: linkEl.value, size: 150 }); } catch (e) { console.error('qr fail', e); }
-setBadge(false);
+setBadge('wait');
 connect();
 
 function connect() {
@@ -744,17 +758,25 @@ function connect() {
   ws.binaryType = 'arraybuffer';
   ws.onopen = function() { S('已进入房间「' + pass + '」，等待对方加入...'); };
   ws.onerror = function() { S('连接错误'); };
-  ws.onclose = function() { peerOnline = false; setBadge(false); refreshSendBtn(); };
+  ws.onclose = function() { peerOnline = false; setBadge('wait'); refreshSendBtn(); };
   ws.onmessage = function(ev) {
-    if (typeof ev.data === 'string') route(JSON.parse(ev.data));
-    else onRecvChunk(ev.data);
+    if (typeof ev.data !== 'string') { onRecvChunk(ev.data); return; }
+    var m = JSON.parse(ev.data);
+    switch (m.type) {                              // 信令只经 WS
+      case 'role': myRole = m.role; return;
+      case 'prefs': peerP2P = !!m.p2p; decideTransport(); return;
+      case 'webrtc-offer': handleOffer(m.sdp); return;
+      case 'webrtc-answer': handleAnswer(m.sdp); return;
+      case 'webrtc-ice': addIce(m.candidate); return;
+      default: route(m);                            // peer-joined/closed 与文件控制
+    }
   };
 }
 
 function route(m) {
   switch (m.type) {
-    case 'peer-joined': peerOnline = true; setBadge(true); S('对方已加入，可互相发送文件'); refreshSendBtn(); break;
-    case 'peer-closed': peerOnline = false; setBadge(false); abortTransfers(); S('对方已离开，等待重新加入...'); break;
+    case 'peer-joined': onPeerJoined(); break;
+    case 'peer-closed': onPeerClosed(); break;
     case 'rmeta': startRecv(m); break;     // 对端要发文件
     case 'rready': onReady(m); break;       // 对端已就绪可开始接收
     case 'rack': onAck(m); break;           // 接收方流控确认
@@ -762,6 +784,118 @@ function route(m) {
     case 'rdone': onSendDone(m); break;     // 接收方已落盘完成
     case 'error': S('错误: ' + (m.message || '')); break;
   }
+}
+
+/* ---------------- 连接生命周期 + P2P/中继协商 ---------------- */
+function onPeerJoined() {
+  peerOnline = true;
+  abortTransfers();          // 清理可能残留的传输（对端刷新/重连场景）
+  resetNegotiation();        // 每次（重新）配对都重新协商通道
+  setBadge('pending');
+  S('对方已加入，正在协商连接…');
+  refreshSendBtn();
+  // 告知对端本端 P2P 偏好并锁定开关；收齐对端偏好或超时后决定通道
+  prefsSent = true; p2pEl.disabled = true;
+  wsSend(JSON.stringify({ type: 'prefs', p2p: p2pEl.checked }));
+  negTimer = setTimeout(decideTransport, 3000);
+}
+function onPeerClosed() {
+  peerOnline = false;
+  resetNegotiation();
+  abortTransfers();
+  setBadge('wait');
+  S('对方已离开，等待重新加入…');
+  refreshSendBtn();
+}
+
+function resetNegotiation() {
+  clearTimeout(negTimer); clearTimeout(rtcTimeout);
+  if (rtc) { try { rtc.close(); } catch (e) {} }
+  rtc = null; dc = null; remoteSet = false; pendingIce = [];
+  transport = 'ws'; CHUNK = WS_CHUNK;
+  decided = false; prefsSent = false; peerP2P = true;
+  p2pEl.disabled = false;
+}
+
+// 两端都勾选「优先 P2P」才打洞；否则直接走 CF 中继
+function decideTransport() {
+  if (decided || !peerOnline) return;
+  decided = true; clearTimeout(negTimer); p2pEl.disabled = true;
+  if (p2pEl.checked && peerP2P) {
+    setBadge('pending'); S('尝试建立 P2P 直连…');
+    rtcTimeout = setTimeout(function() { if (transport !== 'webrtc') fallbackWS('直连超时'); }, 8000);
+    if (myRole === 'sender') initWebRTC();   // s 端发起，r 端等 offer
+  } else {
+    transport = 'ws'; CHUNK = WS_CHUNK; setBadge('ws'); S('通过 CF 中继传输，双方可互发文件');
+  }
+}
+
+function addIce(c) {
+  if (!rtc) return;
+  if (remoteSet) rtc.addIceCandidate(new RTCIceCandidate(c)).catch(function() {});
+  else pendingIce.push(c);
+}
+function flushIce() {
+  var arr = pendingIce; pendingIce = [];
+  for (var i = 0; i < arr.length; i++) { try { rtc.addIceCandidate(new RTCIceCandidate(arr[i])).catch(function() {}); } catch (e) {} }
+}
+
+function newPeer() {
+  remoteSet = false; pendingIce = [];
+  var pc = new RTCPeerConnection({ iceServers: ICE });
+  pc.onicecandidate = function(ev) { if (ev.candidate) wsSend(JSON.stringify({ type: 'webrtc-ice', candidate: ev.candidate })); };
+  pc.onconnectionstatechange = function() {
+    if (!rtc) return;
+    var s = rtc.connectionState;
+    if ((s === 'failed' || s === 'closed') && transport !== 'webrtc') fallbackWS('直连失败');
+  };
+  return pc;
+}
+function setupDC(channel) {
+  dc = channel;
+  dc.binaryType = 'arraybuffer';
+  dc.bufferedAmountLowThreshold = WINDOW / 2;
+  dc.onbufferedamountlow = function() { if (sendCtx) pumpSend(); };
+  dc.onopen = function() {
+    clearTimeout(rtcTimeout);
+    transport = 'webrtc'; CHUNK = RTC_CHUNK; setBadge('webrtc');
+    S('已建立 P2P 直连，双方可互发文件');
+  };
+  dc.onmessage = function(ev) { if (typeof ev.data === 'string') route(JSON.parse(ev.data)); else onRecvChunk(ev.data); };
+}
+function initWebRTC() {   // 发起方(s)
+  try {
+    rtc = newPeer();
+    setupDC(rtc.createDataChannel('room', { ordered: true }));
+    rtc.createOffer().then(function(o) { return rtc.setLocalDescription(o); })
+      .then(function() { wsSend(JSON.stringify({ type: 'webrtc-offer', sdp: rtc.localDescription })); })
+      .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
+  } catch (e) { console.error(e); fallbackWS('不支持 WebRTC'); }
+}
+function handleOffer(sdp) {  // 应答方(r)
+  if (!p2pEl.checked || myRole === 'sender') return;
+  try {
+    rtc = newPeer();
+    rtc.ondatachannel = function(ev) { setupDC(ev.channel); };
+    rtc.setRemoteDescription(new RTCSessionDescription(sdp))
+      .then(function() { remoteSet = true; flushIce(); return rtc.createAnswer(); })
+      .then(function(a) { return rtc.setLocalDescription(a); })
+      .then(function() { wsSend(JSON.stringify({ type: 'webrtc-answer', sdp: rtc.localDescription })); })
+      .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
+  } catch (e) { console.error(e); fallbackWS('协商失败'); }
+}
+function handleAnswer(sdp) {  // 发起方(s)收到应答
+  if (!rtc) return;
+  rtc.setRemoteDescription(new RTCSessionDescription(sdp))
+    .then(function() { remoteSet = true; flushIce(); })
+    .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
+}
+function fallbackWS(reason) {
+  if (transport === 'webrtc') return;   // 已直连成功则不回退
+  clearTimeout(rtcTimeout);
+  if (rtc) { try { rtc.close(); } catch (e) {} rtc = null; dc = null; }
+  transport = 'ws'; CHUNK = WS_CHUNK; setBadge('ws');
+  S((reason ? reason + '，' : '') + '改用 CF 中继，双方可互发文件');
 }
 
 // 对端离开：放弃进行中的收发，恢复界面，便于对方重连后重试
@@ -780,7 +914,7 @@ sendBtn.onclick = function() {
   sendBtn.disabled = true; fileEl.disabled = true;
   sbar.style.width = '0%';
   sstat.textContent = '已请求发送 ' + f.name + '，等待对方确认接收...';
-  wsSend(JSON.stringify({ type: 'rmeta', tid: sendCtx.tid, name: f.name, size: f.size, mime: f.type || 'application/octet-stream' }));
+  sendMsg(JSON.stringify({ type: 'rmeta', tid: sendCtx.tid, name: f.name, size: f.size, mime: f.type || 'application/octet-stream' }));
 };
 
 function onReady(m) {
@@ -798,17 +932,17 @@ async function pumpSend() {
   c.pumping = true;
   do {
     c.rerun = false;
-    while (c.offset < c.file.size && (c.sent - c.acked) < WINDOW) {
-      var end = Math.min(c.offset + WS_CHUNK, c.file.size);
+    while (c.offset < c.file.size && (c.sent - c.acked) < WINDOW && (transport !== 'webrtc' || !dc || dc.bufferedAmount < WINDOW)) {
+      var end = Math.min(c.offset + CHUNK, c.file.size);
       var buf = await c.file.slice(c.offset, end).arrayBuffer();
       if (!sendCtx || sendCtx.tid !== c.tid) { c.pumping = false; return; } // 期间被重置
-      wsSend(buf);
+      sendMsg(buf);
       c.sent += buf.byteLength; c.offset = end;
       sendProg();
     }
   } while (c.rerun);
   c.pumping = false;
-  if (c.offset >= c.file.size && !c.eof) { c.eof = true; wsSend(JSON.stringify({ type: 'reof', tid: c.tid })); }
+  if (c.offset >= c.file.size && !c.eof) { c.eof = true; sendMsg(JSON.stringify({ type: 'reof', tid: c.tid })); }
 }
 
 function sendProg() {
@@ -851,7 +985,7 @@ async function acceptRecv(btn) {
     catch (e) { if (e && e.name === 'AbortError') { btn.disabled = false; return; } c.useMem = true; }
   } else { c.useMem = true; }
   c.t0 = Date.now();
-  wsSend(JSON.stringify({ type: 'rready', tid: c.tid }));
+  sendMsg(JSON.stringify({ type: 'rready', tid: c.tid }));
   rstat.textContent = c.useMem ? '内存接收中(大文件慎用)...' : '接收中...';
 }
 
@@ -862,7 +996,7 @@ async function onRecvChunk(buf) {
   c.writeChain = p; await p;
   c.written += buf.byteLength;
   recvProg();
-  if (c.written - c.lastAck >= ACKEVERY) { c.lastAck = c.written; wsSend(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written })); }
+  if (c.written - c.lastAck >= ACKEVERY) { c.lastAck = c.written; sendMsg(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written })); }
 }
 
 function recvProg() {
@@ -878,7 +1012,7 @@ async function onRecvEof(m) {
   if (!c || m.tid !== c.tid || c.finalizing) return;
   c.finalizing = true;
   await c.writeChain;
-  wsSend(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written }));
+  sendMsg(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written }));
   if (c.writable) {
     await c.writable.close();
   } else {
@@ -888,7 +1022,7 @@ async function onRecvEof(m) {
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
   }
-  wsSend(JSON.stringify({ type: 'rdone', tid: c.tid }));
+  sendMsg(JSON.stringify({ type: 'rdone', tid: c.tid }));
   rbar.style.width = '100%';
   rstat.textContent = '接收完成 ✓  ' + c.meta.name;
   rlist.innerHTML = '';
