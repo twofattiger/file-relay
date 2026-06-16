@@ -23,7 +23,7 @@ func init() {
 
 func main() {
 	flag.Parse()
-	
+
 	if password == "" {
 		password = os.Getenv("PASSWORD")
 	}
@@ -31,8 +31,11 @@ func main() {
 		log.Println("WARNING: PASSWORD is not set. Access to sender role is open.")
 	}
 
-	http.HandleFunc("/", handleIndex)
-	http.HandleFunc("/r/", handleReceiver)
+	http.HandleFunc("/", handleRoot)       // 功能选择页（登录后）
+	http.HandleFunc("/send", handleSend)   // 方式1：分享发送
+	http.HandleFunc("/room", handleRoom)   // 方式2：创建房间
+	http.HandleFunc("/m/", handleRoomPage) // 方式2：房间互传
+	http.HandleFunc("/r/", handleReceiver) // 方式1：接收（匿名）
 	http.HandleFunc("/api/login", handleLogin)
 	http.HandleFunc("/api/logout", handleLogout)
 	http.HandleFunc("/ws/", handleWebSocket)

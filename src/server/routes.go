@@ -6,20 +6,41 @@ import (
 	"strconv"
 )
 
-func handleIndex(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" {
-		http.NotFound(w, r)
-		return
-	}
-	
+// servePage：需登录的页面统一在未登录时返回登录页（登录成功后 reload 回到当前地址）。
+func servePage(w http.ResponseWriter, r *http.Request, authedHTML string) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	if isAuthed(r) {
-		w.Write([]byte(getSenderHTML()))
+		w.Write([]byte(authedHTML))
 	} else {
 		w.Write([]byte(LOGIN_HTML))
 	}
 }
 
+// "/"：登录后展示功能选择卡片（分享发送 / 设备互传）
+func handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	servePage(w, r, CHOICE_HTML)
+}
+
+// "/send"：方式1 分享发送
+func handleSend(w http.ResponseWriter, r *http.Request) {
+	servePage(w, r, getSenderHTML())
+}
+
+// "/room"：方式2 创建房间
+func handleRoom(w http.ResponseWriter, r *http.Request) {
+	servePage(w, r, ROOM_CREATE_HTML)
+}
+
+// "/m/{密码}"：方式2 房间互传
+func handleRoomPage(w http.ResponseWriter, r *http.Request) {
+	servePage(w, r, getRoomHTML())
+}
+
+// "/r/{id}"：方式1 接收（匿名）
 func handleReceiver(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Write([]byte(getReceiverHTML()))
