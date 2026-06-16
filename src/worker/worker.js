@@ -32,8 +32,8 @@ export default {
       const id = path.split("/")[2];
       if (!id) return new Response("bad id", { status: 400 });
       const role = url.searchParams.get("role");
-      // 方式1发送方(sender) 与 方式2房间端(peer) 均需登录；方式1接收方(receiver) 匿名
-      if ((role === "sender" || role === "peer") && !(await isAuthed(request, env))) return new Response("unauthorized", { status: 401 });
+      // 方式1发送方(sender)、方式2房间端(peer)、方式2配对中继(relay) 均需登录；方式1接收方(receiver) 匿名
+      if ((role === "sender" || role === "peer" || role === "relay") && !(await isAuthed(request, env))) return new Response("unauthorized", { status: 401 });
       const stub = env.TRANSFER.get(env.TRANSFER.idFromName(id));
       return stub.fetch(request);
     }
@@ -55,9 +55,6 @@ export default {
 export class TransferSession extends DurableObject {
   constructor(state, env) { super(state, env); this.state = state; this.env = env; }
 
-  // 取连接占用的槽位（s/r）
-  slotTag(ws) { const t = this.state.getTags(ws); return t.includes("s") ? "s" : (t.includes("r") ? "r" : null); }
-
   // 拒绝/告知错误：用一条独立连接发出 error 后立即关闭
   reject(message) {
     const dup = new WebSocketPair();
@@ -72,42 +69,23 @@ export class TransferSession extends DurableObject {
     const url = new URL(request.url);
     const want = url.searchParams.get("role");
 
-    let role, tag, extraTags = [];
-    if (want === "peer") {
-      // 方式2房间：对等端。先回收“同一客户端(cid)的旧连接”（刷新/断线重连），复用其槽位，
-      // 避免把刚刷新的自己当成第三台设备而拒绝。旧连接打上 replaced 标记后再关闭，
-      // 这样它的 webSocketClose 不会向对端误发 peer-closed。
-      const cid = url.searchParams.get("cid") || "";
-      let reclaimed = null;
-      if (cid) {
-        for (const old of this.state.getWebSockets("cid:" + cid)) {
-          reclaimed = this.slotTag(old) || reclaimed;
-          try { old.serializeAttachment({ replaced: true }); } catch (e) {}
-          try { old.close(1000, "replaced"); } catch (e) {}
-        }
-      }
-      if (reclaimed) tag = reclaimed;
-      else if (this.state.getWebSockets("s").length === 0) tag = "s";
-      else if (this.state.getWebSockets("r").length === 0) tag = "r";
-      else return this.reject("房间已满（最多 2 台设备）");
-      role = tag === "s" ? "sender" : "receiver";
-      if (cid) extraTags = ["cid:" + cid];
-    } else {
-      role = want === "sender" ? "sender" : "receiver";
-      tag = role === "sender" ? "s" : "r";
-      if (this.state.getWebSockets(tag).length >= 1) return this.reject("该角色已有连接");
-      // 方式1：transfer id 由发送方创建并先占用 s 槽位，再把 /r/{id} 发出。
-      // 接收方连入时若没有发送方在线，说明链接无效或发送方已离开，直接拒绝而非凭空建会话。
-      if (role === "receiver" && this.state.getWebSockets("s").length === 0) return this.reject("链接无效，或发送方不在线/已离开");
-    }
+    if (want === "peer") return this.acceptPeer(url);    // 方式2：多端房间主会话（mesh 信令 + 名册）
+    if (want === "relay") return this.acceptRelay(url);  // 方式2：某一对设备的中继配对（P2P 失败时兜底）
+
+    // 方式1：固定 sender(s)/receiver(r) 两端，DO 充当中继/信令管道
+    const role = want === "sender" ? "sender" : "receiver";
+    const tag = role === "sender" ? "s" : "r";
+    if (this.state.getWebSockets(tag).length >= 1) return this.reject("该角色已有连接");
+    // transfer id 由发送方创建并先占用 s 槽位，再把 /r/{id} 发出。
+    // 接收方连入时若没有发送方在线，说明链接无效或发送方已离开，直接拒绝而非凭空建会话。
+    if (role === "receiver" && this.state.getWebSockets("s").length === 0) return this.reject("链接无效，或发送方不在线/已离开");
 
     const pair = new WebSocketPair();
     const client = pair[0], server = pair[1];
-    this.state.acceptWebSocket(server, [tag, ...extraTags]);
+    this.state.acceptWebSocket(server, [tag]);
     server.send(JSON.stringify({ type: "role", role }));
 
-    const opp = tag === "s" ? "r" : "s";
-    const others = this.state.getWebSockets(opp);
+    const others = this.state.getWebSockets(tag === "s" ? "r" : "s");
     if (others.length) {
       try { server.send(JSON.stringify({ type: "peer-joined" })); } catch (e) {}
       for (const o of others) { try { o.send(JSON.stringify({ type: "peer-joined" })); } catch (e) {} }
@@ -115,19 +93,115 @@ export class TransferSession extends DurableObject {
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 被新连接替换的旧连接：不向对端发 peer-closed（否则刷新重连会让对端误判“对方离开”）
+  // ---- 方式2 多端房间：每个连接分配稳定 pid，维护名册；文件走端到端 WebRTC，不经 DO ----
+  acceptPeer(url) {
+    const cid = url.searchParams.get("cid") || "";
+    // 同一客户端(cid)的旧连接（刷新/断线重连）：复用其 pid/name，标记 replaced 后关闭
+    let pid = null, name = "";
+    if (cid) {
+      for (const old of this.state.getWebSockets("cid:" + cid)) {
+        const a = old.deserializeAttachment() || {};
+        if (a.pid) pid = a.pid;
+        if (a.name) name = a.name;
+        try { old.serializeAttachment({ ...a, replaced: true }); } catch (e) {}
+        try { old.close(1000, "replaced"); } catch (e) {}
+      }
+    }
+    if (!pid) pid = crypto.randomUUID();
+
+    const pair = new WebSocketPair();
+    const client = pair[0], server = pair[1];
+    try { server.serializeAttachment({ pid, name, cid }); } catch (e) {}
+    this.state.acceptWebSocket(server, ["peer", "pid:" + pid, "cid:" + cid]);
+    try { server.send(JSON.stringify({ type: "self", pid })); } catch (e) {}
+    this.broadcastRoster();
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // ---- 方式2 中继配对：独立 DO 实例（idFromName(房间_pidA_pidB)），仅一对设备占 s/r 两端。
+  //      文件二进制在 s↔r 之间转发（复用 webSocketMessage 的方式1分支），无需路由头。 ----
+  acceptRelay(url) {
+    const cid = url.searchParams.get("cid") || "";
+    let reclaimed = null;   // 同一端刷新/重连：复用其槽位
+    if (cid) {
+      for (const old of this.state.getWebSockets("cid:" + cid)) {
+        const t = this.state.getTags(old);
+        const slot = t.includes("s") ? "s" : (t.includes("r") ? "r" : null);
+        if (slot) reclaimed = slot;
+        try { old.serializeAttachment({ replaced: true }); } catch (e) {}
+        try { old.close(1000, "replaced"); } catch (e) {}
+      }
+    }
+    let tag;
+    if (reclaimed) tag = reclaimed;
+    else if (this.state.getWebSockets("s").length === 0) tag = "s";
+    else if (this.state.getWebSockets("r").length === 0) tag = "r";
+    else return this.reject("中继配对已满");
+
+    const pair = new WebSocketPair();
+    const client = pair[0], server = pair[1];
+    try { server.serializeAttachment({ cid }); } catch (e) {}
+    this.state.acceptWebSocket(server, [tag, "cid:" + cid]);
+
+    const others = this.state.getWebSockets(tag === "s" ? "r" : "s");
+    if (others.length) {   // 两端齐 → 双方就绪
+      try { server.send(JSON.stringify({ type: "peer-joined" })); } catch (e) {}
+      for (const o of others) { try { o.send(JSON.stringify({ type: "peer-joined" })); } catch (e) {} }
+    }
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  // 当前在线设备名册（排除被替换的旧连接，可额外排除一个正在关闭的连接）
+  roster(exclude) {
+    const peers = [];
+    for (const ws of this.state.getWebSockets("peer")) {
+      if (ws === exclude || this.isReplaced(ws)) continue;
+      const a = ws.deserializeAttachment() || {};
+      if (a.pid) peers.push({ pid: a.pid, name: a.name || "" });
+    }
+    return peers;
+  }
+  broadcastRoster(exclude) {
+    const msg = JSON.stringify({ type: "roster", peers: this.roster(exclude) });
+    for (const ws of this.state.getWebSockets("peer")) {
+      if (ws === exclude || this.isReplaced(ws)) continue;
+      try { ws.send(msg); } catch (e) {}
+    }
+  }
+
+  // 被新连接替换的旧连接：不向对端发离线通知（否则刷新重连会让对端误判“离开”）
   isReplaced(ws) { try { const a = ws.deserializeAttachment(); return !!(a && a.replaced); } catch (e) { return false; } }
 
-  // prefs / webrtc-* / meta / 二进制等所有消息一律原样转发给对端
   async webSocketMessage(ws, message) {
+    if (this.state.getTags(ws).includes("peer")) return this.peerMessage(ws, message);
+    // 方式1：prefs / webrtc-* / meta / 二进制等所有消息一律原样转发给对端
     const isSender = this.state.getTags(ws).includes("s");
     const targets = this.state.getWebSockets(isSender ? "r" : "s");
     if (!targets.length) { try { ws.send(JSON.stringify({ type: "peer-closed" })); } catch (e) {} return; }
     try { targets[0].send(message); } catch (e) { try { ws.send(JSON.stringify({ type: "error", message: "relay failed" })); } catch (_) {} }
   }
 
+  // 方式2：只中继 JSON 信令（rename 改名 / signal 定向 WebRTC 信令）；文件二进制走 P2P 不到这里
+  peerMessage(ws, message) {
+    if (typeof message !== "string") return;
+    let m; try { m = JSON.parse(message); } catch (e) { return; }
+    const a = ws.deserializeAttachment() || {};
+    if (m.type === "rename") {
+      a.name = String(m.name || "").slice(0, 40);
+      try { ws.serializeAttachment(a); } catch (e) {}
+      this.broadcastRoster();
+    } else if (m.type === "signal" && m.to) {
+      const out = JSON.stringify({ type: "signal", from: a.pid, data: m.data });
+      for (const t of this.state.getWebSockets("pid:" + m.to)) {
+        if (this.isReplaced(t)) continue;
+        try { t.send(out); } catch (e) {}
+      }
+    }
+  }
+
   async webSocketClose(ws) {
     if (this.isReplaced(ws)) { try { ws.close(1000); } catch (e) {} return; }
+    if (this.state.getTags(ws).includes("peer")) { try { ws.close(1000); } catch (e) {} this.broadcastRoster(ws); return; }
     const isSender = this.state.getTags(ws).includes("s");
     for (const o of this.state.getWebSockets(isSender ? "r" : "s")) { try { o.send(JSON.stringify({ type: "peer-closed" })); } catch (e) {} }
     try { ws.close(1000); } catch (e) {}
@@ -136,6 +210,7 @@ export class TransferSession extends DurableObject {
   async webSocketError(ws) {
     try {
       if (this.isReplaced(ws)) return;
+      if (this.state.getTags(ws).includes("peer")) { this.broadcastRoster(ws); return; }
       const isSender = this.state.getTags(ws).includes("s");
       for (const o of this.state.getWebSockets(isSender ? "r" : "s")) { try { o.send(JSON.stringify({ type: "peer-closed" })); } catch (e) {} }
     } catch (e) {}
@@ -187,7 +262,7 @@ const STYLE =
   "<style>" +
   "*{box-sizing:border-box}body{margin:0;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;background:#0f1115;color:#e6e6e6;display:flex;min-height:100vh;align-items:center;justify-content:center;padding:20px}" +
   ".card{width:100%;max-width:520px;background:#171a21;border:1px solid #262b36;border-radius:14px;padding:28px}" +
-  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;gap:8px}input,button{font-size:16px}" +
+  "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;flex-wrap:wrap;gap:8px}input,button{font-size:16px}" +
   "input[type=password],input[type=text]{width:100%;padding:11px 12px;background:#0f1115;border:1px solid #2c3340;border-radius:9px;color:#e6e6e6;margin-bottom:12px}" +
   "input[type=file]{margin-bottom:14px}" +
   "button{cursor:pointer;padding:11px 16px;border:0;border-radius:9px;background:#3b82f6;color:#fff;font-weight:600}" +
@@ -195,7 +270,7 @@ const STYLE =
   ".row{display:flex;gap:8px}.row input{flex:1;margin-bottom:0}" +
   "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:56px;white-space:pre-line;line-height:1.7}" +
   ".barwrap{height:8px;background:#0f1115;border-radius:6px;overflow:hidden;margin-top:14px;border:1px solid #2c3340}" +
-  "#bar,#sbar,#rbar{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .15s}" +
+  "#bar,#sbar,#rbar,.pbar{height:100%;width:0;background:linear-gradient(90deg,#3b82f6,#22d3ee);transition:width .15s}" +
   ".hint{font-size:12px;color:#6b7280;margin-top:10px}" +
   ".info{background:#0f1115;border:1px solid #2c3340;border-radius:9px;padding:12px;margin-bottom:14px;font-size:14px;display:none}" +
   ".opt{display:flex;align-items:center;gap:8px;margin-bottom:14px;font-size:13px;color:#9aa4b2;cursor:pointer;user-select:none}" +
@@ -216,9 +291,19 @@ const STYLE =
   ".roomtop{background:#0f1115;border:1px solid #2c3340;border-radius:12px;padding:16px;margin-bottom:6px}" +
   ".panes{display:flex;gap:16px;flex-wrap:wrap;margin-top:18px}" +
   ".pane{flex:1;min-width:260px;background:#0f1115;border:1px solid #2c3340;border-radius:12px;padding:16px}" +
-  ".pane h2{font-size:15px;margin:0 0 12px}" +
+  ".pane h2{font-size:15px;margin:0 0 12px}.pane h3{font-size:13px;margin:0 0 10px;color:#cbd5e1}" +
   ".substat{margin-top:10px;font-size:13px;color:#9aa4b2;min-height:20px;white-space:pre-line;line-height:1.6}" +
   ".recvitem{background:#171a21;border:1px solid #2c3340;border-radius:9px;padding:12px;margin-bottom:10px;font-size:13px;display:flex;flex-direction:column;gap:10px}" +
+  // 多端设备互传：设备名输入框 + 每设备一张卡片（卡内左发右收）
+  "#rname{flex:none;width:130px;margin:0 4px;padding:7px 10px;font-size:13px}" +
+  ".device{background:#14171e;border:1px solid #262b36;border-radius:12px;padding:14px;margin-top:14px}" +
+  ".device .panes{margin-top:0}" +
+  ".dev-head{display:flex;align-items:center;gap:10px;margin-bottom:6px}" +
+  ".dev-name{font-weight:600;font-size:15px}" +
+  ".dev-conn{margin-left:auto;font-size:12px;padding:3px 10px;border-radius:999px;background:#262b36;color:#9aa4b2;border:1px solid #2c3340}" +
+  ".dev-conn.ok{background:#064e3b;color:#34d399;border-color:#065f46}" +
+  ".dev-conn.bad{background:#3f1d1d;color:#fca5a5;border-color:#7f1d1d}" +
+  ".empty{color:#6b7280;font-size:13px;text-align:center;padding:22px 10px}" +
   "@media (max-width:480px){.card{padding:20px}body{padding:10px}}" +
   "</style>";
 
@@ -244,7 +329,7 @@ const CHOICE_HTML =
   "<div class=card><h1>🚀 选择功能</h1>" +
   "<div class=choice>" +
   "<a class=tile href='/send'><div class=ic>📤</div><div class=tt>分享发送</div><div class=ds>选择文件，生成链接 / 二维码，发给对方一次性接收</div></a>" +
-  "<a class=tile href='/room'><div class=ic>🔁</div><div class=tt>设备互传</div><div class=ds>创建房间，两台设备登录后左右双向、多次互发文件</div></a>" +
+  "<a class=tile href='/room'><div class=ic>🔁</div><div class=tt>设备互传</div><div class=ds>创建房间，多台设备登录后两两直连、双向多次互发文件</div></a>" +
   "</div>" +
   "<div style='margin-top:18px;text-align:right'><a href='/api/logout' style='font-size:13px;color:#9aa4b2;text-decoration:none'>退出登录</a></div>" +
   "</div>";
@@ -270,23 +355,12 @@ const ROOM_HTML =
   "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 设备互传</title>" + STYLE +
   "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js'></script>" +
-  "<div class='card wide'><h1>🔁 设备互传 <span id=badge class=badge></span><a class=back href='/'>返回</a></h1>" +
+  "<div class='card wide'><h1>🔁 设备互传 <input id=rname type=text placeholder='设备名称' maxlength=20><a class=back href='/'>返回</a></h1>" +
   "<div class=roomtop>" +
   "<div class=row><input id=rlink type=text readonly><button id=rcopy class=ghost>复制</button></div>" +
   "<div style='text-align:center;margin-top:12px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>" +
-  "<div class=hint>让另一台设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。</div>" +
-  "<label class=opt style='margin:12px 0 0'><input id=rp2p type=checkbox checked> ⚡ 优先 P2P 直连（两端都勾选才尝试点对点直传，否则走服务端中继）</label></div>" +
-  "<div class=panes>" +
-  "<div class=pane><h2>📤 发送给对方</h2>" +
-  "<input id=rfile type=file>" +
-  "<button id=rsend disabled>发送</button>" +
-  "<div class=barwrap><div id=sbar></div></div>" +
-  "<div id=sstat class=substat></div></div>" +
-  "<div class=pane><h2>📥 接收对方文件</h2>" +
-  "<div id=rlist></div>" +
-  "<div class=barwrap><div id=rbar></div></div>" +
-  "<div id=rstat class=substat></div></div>" +
-  "</div>" +
+  "<div class=hint>让其它设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。每加入一台设备会在下方出现一张卡片，可与其双向互发文件。</div></div>" +
+  "<div id=devices></div>" +
   "<div id=status></div></div>" +
   "<script>" + ROOM_JS() + "</script>";
 
@@ -704,329 +778,381 @@ connect();
 //   因为每端只处理「自己收到的二进制块」(对端→本端) 与「自己发出的块」(本端→对端)。
 //   传输走 WebSocket 经 DO 中继，消息均带 tid 以区分不同次传输。
 // ============================================================
+// 方式2 · 多设备房间客户端（WebRTC mesh）：
+//   信令/名册经 DO 的 WS；文件在设备间用各自的 DataChannel 端到端直传，不经服务器。
+//   每个远程设备 = 一个 Peer 对象 + 一张卡片（卡内左「发送」右「接收」，窄屏自动竖排）。
+//   每对设备由 pid 字典序较小的一方作为 offerer，避免双方同时发起(glare)。
+// ============================================================
+// 方式2 · 多设备房间客户端（WebRTC mesh，失败回退 CF 中继）：
+//   主会话(role=peer)经 DO 的 WS 收发：设备名册(roster) + WebRTC 信令(signal)。
+//   每个远程设备 = 一个 Peer 对象 + 一张卡片（卡内左「发送」右「接收」，窄屏自动竖排）。
+//   每对设备优先用 WebRTC DataChannel 端到端直传(transport='webrtc')；打洞失败/超时则
+//   各自连一条 role=relay 的「配对中继 WS」回退(transport='relay')——该配对是独立 DO 实例
+//   (idFromName(房间_pidA_pidB))，里面只有 s/r 两端，二进制天然路由到对端。
+//   每对由 pid 字典序较小者作 offerer，避免 glare。发送/接收逻辑与通道无关(pSend 统一)。
+// ============================================================
 function ROOM_JS() {
   return FMT_JS() + `
 var WS_CHUNK = ${WS_CHUNK_SIZE}, RTC_CHUNK = ${RTC_CHUNK_SIZE}, WINDOW = ${WINDOW_BYTES}, ACKEVERY = ${ACK_EVERY};
 var ICE = ${JSON.stringify(STUN_SERVERS.map(function(u){return {urls:u};}))};
+var P2P_TIMEOUT = 9000;   // 直连协商超时(ms)，超时回退中继
 var pass = location.pathname.split('/')[2] || '';
-var id = pass;                       // 房间 id 即密码（DO idFromName）
-var cid = roomCid();                 // 本端稳定标识：刷新/重连复用同一槽位，不被当作第三台设备
-var ws = null, peerOnline = false;
-var myRole = null;                   // DO 分配的槽位角色：sender(s) 作为 WebRTC 发起方，receiver(r) 应答
-var transport = 'ws', CHUNK = WS_CHUNK;   // 当前文件通道：'ws'(CF 中继) | 'webrtc'(P2P 直连)
-var rtc = null, dc = null, remoteSet = false, pendingIce = [];
-var peerP2P = true, prefsSent = false, decided = false, negTimer = null, rtcTimeout = null;
+var id = pass, cid = roomCid();
+var ws = null, myPid = null, peers = {};   // pid -> Peer
+var myName = loadName();
 
-// 客户端 id 存 sessionStorage：同标签刷新保留(=重连)，关闭标签即弃
-function roomCid() {
-  var k = 'room-cid-' + pass;
-  try {
-    var v = sessionStorage.getItem(k);
-    if (!v) { v = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2)); sessionStorage.setItem(k, v); }
-    return v;
-  } catch (e) { return String(Date.now()) + Math.random().toString(16).slice(2); }
-}
-var sendCtx = null, recvCtx = null;  // 同一时刻各最多一个
+function uuid() { return crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2); }
+function roomCid() { var k = 'room-cid-' + pass; try { var v = sessionStorage.getItem(k); if (!v) { v = uuid(); sessionStorage.setItem(k, v); } return v; } catch (e) { return uuid(); } }
+function loadName() { try { return localStorage.getItem('room-name') || ''; } catch (e) { return ''; } }
+function saveName(n) { try { localStorage.setItem('room-name', n); } catch (e) {} }
 
-var fileEl = document.getElementById('rfile'), sendBtn = document.getElementById('rsend');
-var sbar = document.getElementById('sbar'), sstat = document.getElementById('sstat');
-var rlist = document.getElementById('rlist'), rbar = document.getElementById('rbar'), rstat = document.getElementById('rstat');
-var linkEl = document.getElementById('rlink'), p2pEl = document.getElementById('rp2p');
-var stat = document.getElementById('status'), badge = document.getElementById('badge');
+var nameEl = document.getElementById('rname');
+var devicesEl = document.getElementById('devices');
+var linkEl = document.getElementById('rlink');
+var stat = document.getElementById('status');
 
 function S(s) { stat.textContent = s; }
-function setBadge(state) {
-  var map = { wait: ['等待对方', ''], pending: ['协商中…', ''], webrtc: ['P2P 直连', 'p2p'], ws: ['CF 中继', 'relay'] };
-  var v = map[state] || map.wait;
-  badge.textContent = v[0]; badge.className = 'badge' + (v[1] ? ' ' + v[1] : ''); badge.style.display = 'inline-block';
-}
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
-function wsSend(d) { if (ws && ws.readyState === 1) ws.send(d); }                 // 信令始终走 WS
-function sendMsg(d) { if (transport === 'webrtc' && dc && dc.readyState === 'open') dc.send(d); else wsSend(d); } // 文件数据走当前通道
-function refreshSendBtn() { sendBtn.disabled = !(fileEl.files.length && peerOnline) || !!sendCtx; }
 
-// 顶部：链接 / 复制 / 二维码
+// 顶部：链接 / 复制 / 二维码 / 设备名
 linkEl.value = location.origin + '/m/' + pass;
 document.getElementById('rcopy').onclick = function() { linkEl.select(); if (navigator.clipboard) navigator.clipboard.writeText(linkEl.value); };
 try { new QRious({ element: document.getElementById('qr'), value: linkEl.value, size: 150 }); } catch (e) { console.error('qr fail', e); }
-setBadge('wait');
+nameEl.value = myName;
+nameEl.addEventListener('change', commitName);
+nameEl.addEventListener('blur', commitName);
+function commitName() {                       // 失焦/回车提交，变化才广播
+  var n = (nameEl.value || '').trim().slice(0, 20);
+  if (n === myName) return;
+  myName = n; saveName(n);
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'rename', name: myName }));
+}
+
+renderEmpty();
 connect();
 
 function connect() {
   var p = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(p + '://' + location.host + '/ws/' + id + '?role=peer&cid=' + encodeURIComponent(cid));
   ws.binaryType = 'arraybuffer';
-  ws.onopen = function() { S('已进入房间「' + pass + '」，等待对方加入...'); };
+  ws.onopen = function() { S('已进入房间「' + pass + '」，等待其它设备加入…'); };
   ws.onerror = function() { S('连接错误'); };
-  ws.onclose = function() { peerOnline = false; setBadge('wait'); refreshSendBtn(); };
+  ws.onclose = function() { S('与服务器断开，请刷新重连'); };
   ws.onmessage = function(ev) {
-    if (typeof ev.data !== 'string') { onRecvChunk(ev.data); return; }
+    if (typeof ev.data !== 'string') return;   // 主会话只走信令，不传文件
     var m = JSON.parse(ev.data);
-    switch (m.type) {                              // 信令只经 WS
-      case 'role': myRole = m.role; return;
-      case 'prefs': peerP2P = !!m.p2p; decideTransport(); return;
-      case 'webrtc-offer': handleOffer(m.sdp); return;
-      case 'webrtc-answer': handleAnswer(m.sdp); return;
-      case 'webrtc-ice': addIce(m.candidate); return;
-      default: route(m);                            // peer-joined/closed 与文件控制
+    if (m.type === 'self') { myPid = m.pid; if (myName) ws.send(JSON.stringify({ type: 'rename', name: myName })); }
+    else if (m.type === 'roster') updateRoster(m.peers);
+    else if (m.type === 'signal') handleSignal(m.from, m.data);
+  };
+}
+
+/* ---------------- 设备名册 ---------------- */
+function updateRoster(list) {
+  var seen = {};
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i];
+    if (p.pid && p.pid !== myPid) { seen[p.pid] = 1; ensurePeer(p.pid, p.name); }
+  }
+  Object.keys(peers).forEach(function(pid) { if (!seen[pid]) removePeer(pid); });
+  renderEmpty();
+}
+function renderEmpty() {
+  var has = Object.keys(peers).length > 0;
+  var e = document.getElementById('empty');
+  if (has) { if (e) e.remove(); }
+  else if (!e) {
+    var d = document.createElement('div'); d.id = 'empty'; d.className = 'empty';
+    d.textContent = '还没有其它设备。让另一台设备扫码或访问相同链接加入。';
+    devicesEl.appendChild(d);
+  }
+}
+function amOfferer(pid) { return String(myPid) < String(pid); }  // pid 较小者发起，保证每对唯一 offerer
+
+function ensurePeer(pid, name) {
+  var pr = peers[pid];
+  if (!pr) {
+    pr = peers[pid] = { pid: pid, name: name || '', transport: null, chunk: WS_CHUNK,
+      pc: null, dc: null, remoteSet: false, pendingIce: [],
+      relayWs: null, ready: false, p2pTimer: null, reconnectT: null,
+      sendCtx: null, recvCtx: null, els: null };
+    buildCard(pr);
+    devicesEl.appendChild(pr.els.root);
+  }
+  if (name != null) { pr.name = name; setName(pr); }
+  if (!pr.pc && !pr.relayWs) {        // 尚未建立任何通道 → 开始协商（优先 P2P）
+    armP2PTimeout(pr);
+    if (amOfferer(pid)) startConnect(pr);
+  }
+}
+function removePeer(pid) {
+  var pr = peers[pid]; if (!pr) return;
+  teardownPC(pr); teardownRelay(pr); clearTimeout(pr.p2pTimer);
+  if (pr.els && pr.els.root) pr.els.root.remove();
+  delete peers[pid];
+}
+
+/* ---------------- 通道协商：优先 WebRTC，失败回退 CF 中继 ---------------- */
+function armP2PTimeout(pr) {
+  if (pr.p2pTimer) return;
+  pr.p2pTimer = setTimeout(function() { if (!pr.ready && peers[pr.pid]) fallbackRelay(pr); }, P2P_TIMEOUT);
+}
+function signal(pid, data) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'signal', to: pid, data: data })); }
+function createPC(pr) {
+  teardownPC(pr);
+  pr.remoteSet = false; pr.pendingIce = [];
+  pr.pc = new RTCPeerConnection({ iceServers: ICE });
+  pr.pc.onicecandidate = function(ev) { if (ev.candidate) signal(pr.pid, { ice: ev.candidate }); };
+  pr.pc.onconnectionstatechange = function() { onConnState(pr); };
+  pr.pc.ondatachannel = function(ev) { attachDC(pr, ev.channel); };
+}
+function startConnect(pr) {                   // offerer
+  createPC(pr);
+  attachDC(pr, pr.pc.createDataChannel('file', { ordered: true }));
+  setConn(pr, '直连协商中…', '');
+  pr.pc.createOffer().then(function(o) { return pr.pc.setLocalDescription(o); })
+    .then(function() { signal(pr.pid, { sdp: pr.pc.localDescription }); })
+    .catch(function(e) { console.error(e); fallbackRelay(pr); });
+}
+function handleSignal(from, data) {
+  if (from === myPid) return;
+  var pr = peers[from];
+  if (!pr) { ensurePeer(from, null); pr = peers[from]; }
+  if (!pr) return;
+  if (data.sdp) {
+    if (data.sdp.type === 'offer') {
+      createPC(pr);                            // answerer：新建 PC 接收（丢弃旧的）
+      setConn(pr, '直连协商中…', '');
+      pr.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+        .then(function() { pr.remoteSet = true; flushIce(pr); return pr.pc.createAnswer(); })
+        .then(function(a) { return pr.pc.setLocalDescription(a); })
+        .then(function() { signal(pr.pid, { sdp: pr.pc.localDescription }); })
+        .catch(function(e) { console.error(e); fallbackRelay(pr); });
+    } else if (pr.pc) {                         // answer：offerer 收到
+      pr.pc.setRemoteDescription(new RTCSessionDescription(data.sdp))
+        .then(function() { pr.remoteSet = true; flushIce(pr); })
+        .catch(function(e) { console.error(e); });
     }
-  };
-}
-
-function route(m) {
-  switch (m.type) {
-    case 'peer-joined': onPeerJoined(); break;
-    case 'peer-closed': onPeerClosed(); break;
-    case 'rmeta': startRecv(m); break;     // 对端要发文件
-    case 'rready': onReady(m); break;       // 对端已就绪可开始接收
-    case 'rack': onAck(m); break;           // 接收方流控确认
-    case 'reof': onRecvEof(m); break;       // 对端发送完毕
-    case 'rdone': onSendDone(m); break;     // 接收方已落盘完成
-    case 'error': S('错误: ' + (m.message || '')); break;
+  } else if (data.ice) {
+    if (pr.pc && pr.remoteSet) pr.pc.addIceCandidate(new RTCIceCandidate(data.ice)).catch(function() {});
+    else if (pr.pc) pr.pendingIce.push(data.ice);
   }
 }
-
-/* ---------------- 连接生命周期 + P2P/中继协商 ---------------- */
-function onPeerJoined() {
-  peerOnline = true;
-  abortTransfers();          // 清理可能残留的传输（对端刷新/重连场景）
-  resetNegotiation();        // 每次（重新）配对都重新协商通道
-  setBadge('pending');
-  S('对方已加入，正在协商连接…');
-  refreshSendBtn();
-  // 告知对端本端 P2P 偏好并锁定开关；收齐对端偏好或超时后决定通道
-  prefsSent = true; p2pEl.disabled = true;
-  wsSend(JSON.stringify({ type: 'prefs', p2p: p2pEl.checked }));
-  negTimer = setTimeout(decideTransport, 3000);
+function flushIce(pr) {
+  var arr = pr.pendingIce; pr.pendingIce = [];
+  for (var i = 0; i < arr.length; i++) { try { pr.pc.addIceCandidate(new RTCIceCandidate(arr[i])).catch(function() {}); } catch (e) {} }
 }
-function onPeerClosed() {
-  peerOnline = false;
-  resetNegotiation();
-  abortTransfers();
-  setBadge('wait');
-  S('对方已离开，等待重新加入…');
-  refreshSendBtn();
+function attachDC(pr, ch) {
+  pr.dc = ch; ch.binaryType = 'arraybuffer';
+  ch.bufferedAmountLowThreshold = WINDOW / 2;
+  ch.onbufferedamountlow = function() { if (pr.sendCtx) pumpSend(pr); };
+  ch.onopen = function() {                      // 直连成功：关掉中继兜底，切到 P2P
+    clearTimeout(pr.p2pTimer); pr.p2pTimer = null;
+    teardownRelay(pr);
+    pr.transport = 'webrtc'; pr.chunk = RTC_CHUNK; pr.ready = true;
+    setConn(pr, '已直连 (P2P)', 'ok'); refreshSendBtn(pr);
+  };
+  ch.onclose = function() { if (pr.transport === 'webrtc') { pr.ready = false; refreshSendBtn(pr); } };
+  ch.onmessage = function(ev) { if (typeof ev.data === 'string') onCtrl(pr, JSON.parse(ev.data)); else onChunk(pr, ev.data); };
 }
-
-function resetNegotiation() {
-  clearTimeout(negTimer); clearTimeout(rtcTimeout);
-  if (rtc) { try { rtc.close(); } catch (e) {} }
-  rtc = null; dc = null; remoteSet = false; pendingIce = [];
-  transport = 'ws'; CHUNK = WS_CHUNK;
-  decided = false; prefsSent = false; peerP2P = true;
-  p2pEl.disabled = false;
-}
-
-// 两端都勾选「优先 P2P」才打洞；否则直接走 CF 中继
-function decideTransport() {
-  if (decided || !peerOnline) return;
-  decided = true; clearTimeout(negTimer); p2pEl.disabled = true;
-  if (p2pEl.checked && peerP2P) {
-    setBadge('pending'); S('尝试建立 P2P 直连…');
-    rtcTimeout = setTimeout(function() { if (transport !== 'webrtc') fallbackWS('直连超时'); }, 8000);
-    if (myRole === 'sender') initWebRTC();   // s 端发起，r 端等 offer
-  } else {
-    transport = 'ws'; CHUNK = WS_CHUNK; setBadge('ws'); S('通过 CF 中继传输，双方可互发文件');
+function onConnState(pr) {
+  if (!pr.pc) return;
+  var s = pr.pc.connectionState;
+  if (s === 'connecting') { if (!pr.ready) setConn(pr, '直连协商中…', ''); }
+  else if (s === 'disconnected') { if (pr.transport === 'webrtc') setConn(pr, '网络波动…', 'bad'); }  // 可能自行恢复
+  else if (s === 'failed' || s === 'closed') {
+    if (!peers[pr.pid]) return;
+    abortPeerTransfers(pr);
+    fallbackRelay(pr);                          // 直连不行 → 回退 CF 中继
   }
 }
-
-function addIce(c) {
-  if (!rtc) return;
-  if (remoteSet) rtc.addIceCandidate(new RTCIceCandidate(c)).catch(function() {});
-  else pendingIce.push(c);
-}
-function flushIce() {
-  var arr = pendingIce; pendingIce = [];
-  for (var i = 0; i < arr.length; i++) { try { rtc.addIceCandidate(new RTCIceCandidate(arr[i])).catch(function() {}); } catch (e) {} }
+function teardownPC(pr) {
+  clearTimeout(pr.reconnectT);
+  if (pr.dc) { try { pr.dc.close(); } catch (e) {} pr.dc = null; }
+  if (pr.pc) { try { pr.pc.close(); } catch (e) {} pr.pc = null; }
+  pr.remoteSet = false; pr.pendingIce = [];
+  if (pr.transport === 'webrtc') { pr.transport = null; pr.ready = false; }
 }
 
-function newPeer() {
-  remoteSet = false; pendingIce = [];
-  var pc = new RTCPeerConnection({ iceServers: ICE });
-  pc.onicecandidate = function(ev) { if (ev.candidate) wsSend(JSON.stringify({ type: 'webrtc-ice', candidate: ev.candidate })); };
-  pc.onconnectionstatechange = function() {
-    if (!rtc) return;
-    var s = rtc.connectionState;
-    if ((s === 'failed' || s === 'closed') && transport !== 'webrtc') fallbackWS('直连失败');
+// 回退到 CF 中继：拆掉 P2P，连一条该对设备专用的 relay 配对 WS
+function fallbackRelay(pr) {
+  if (!peers[pr.pid]) return;
+  if (pr.transport === 'relay' && pr.ready) return;   // 已在中继且可用
+  clearTimeout(pr.p2pTimer); pr.p2pTimer = null;
+  teardownPC(pr);
+  connectRelay(pr);
+}
+function relayId(pr) { return pass + '_' + [String(myPid), String(pr.pid)].sort().join('_'); }
+function connectRelay(pr) {
+  if (pr.relayWs) return;
+  setConn(pr, '中继连接中…', '');
+  var p = location.protocol === 'https:' ? 'wss' : 'ws';
+  var w = pr.relayWs = new WebSocket(p + '://' + location.host + '/ws/' + encodeURIComponent(relayId(pr)) + '?role=relay&cid=' + encodeURIComponent(cid));
+  w.binaryType = 'arraybuffer';
+  w.onerror = function() {};
+  w.onclose = function() { if (pr.relayWs === w) { pr.relayWs = null; if (pr.transport === 'relay') { pr.ready = false; refreshSendBtn(pr); } } };
+  w.onmessage = function(ev) {
+    if (typeof ev.data !== 'string') { onChunk(pr, ev.data); return; }
+    var m = JSON.parse(ev.data);
+    if (m.type === 'peer-joined') { pr.transport = 'relay'; pr.chunk = WS_CHUNK; pr.ready = true; setConn(pr, '已连接 (中继)', 'ok'); refreshSendBtn(pr); }
+    else if (m.type === 'peer-closed') { pr.ready = false; refreshSendBtn(pr); abortPeerTransfers(pr); setConn(pr, '对方已断开', 'bad'); }
+    else if (m.type === 'error') { setConn(pr, '中继失败：' + (m.message || ''), 'bad'); }
+    else onCtrl(pr, m);
   };
-  return pc;
 }
-function setupDC(channel) {
-  dc = channel;
-  dc.binaryType = 'arraybuffer';
-  dc.bufferedAmountLowThreshold = WINDOW / 2;
-  dc.onbufferedamountlow = function() { if (sendCtx) pumpSend(); };
-  dc.onopen = function() {
-    clearTimeout(rtcTimeout);
-    transport = 'webrtc'; CHUNK = RTC_CHUNK; setBadge('webrtc');
-    S('已建立 P2P 直连，双方可互发文件');
-  };
-  dc.onmessage = function(ev) { if (typeof ev.data === 'string') route(JSON.parse(ev.data)); else onRecvChunk(ev.data); };
-}
-function initWebRTC() {   // 发起方(s)
-  try {
-    rtc = newPeer();
-    setupDC(rtc.createDataChannel('room', { ordered: true }));
-    rtc.createOffer().then(function(o) { return rtc.setLocalDescription(o); })
-      .then(function() { wsSend(JSON.stringify({ type: 'webrtc-offer', sdp: rtc.localDescription })); })
-      .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
-  } catch (e) { console.error(e); fallbackWS('不支持 WebRTC'); }
-}
-function handleOffer(sdp) {  // 应答方(r)
-  if (!p2pEl.checked || myRole === 'sender') return;
-  try {
-    rtc = newPeer();
-    rtc.ondatachannel = function(ev) { setupDC(ev.channel); };
-    rtc.setRemoteDescription(new RTCSessionDescription(sdp))
-      .then(function() { remoteSet = true; flushIce(); return rtc.createAnswer(); })
-      .then(function(a) { return rtc.setLocalDescription(a); })
-      .then(function() { wsSend(JSON.stringify({ type: 'webrtc-answer', sdp: rtc.localDescription })); })
-      .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
-  } catch (e) { console.error(e); fallbackWS('协商失败'); }
-}
-function handleAnswer(sdp) {  // 发起方(s)收到应答
-  if (!rtc) return;
-  rtc.setRemoteDescription(new RTCSessionDescription(sdp))
-    .then(function() { remoteSet = true; flushIce(); })
-    .catch(function(e) { console.error(e); fallbackWS('协商失败'); });
-}
-function fallbackWS(reason) {
-  if (transport === 'webrtc') return;   // 已直连成功则不回退
-  clearTimeout(rtcTimeout);
-  if (rtc) { try { rtc.close(); } catch (e) {} rtc = null; dc = null; }
-  transport = 'ws'; CHUNK = WS_CHUNK; setBadge('ws');
-  S((reason ? reason + '，' : '') + '改用 CF 中继，双方可互发文件');
+function teardownRelay(pr) {
+  if (pr.relayWs) { try { pr.relayWs.onclose = null; pr.relayWs.close(); } catch (e) {} pr.relayWs = null; }
+  if (pr.transport === 'relay') { pr.transport = null; pr.ready = false; }
 }
 
-// 对端离开：放弃进行中的收发，恢复界面，便于对方重连后重试
-function abortTransfers() {
-  if (sendCtx) { sendCtx = null; fileEl.disabled = false; sbar.style.width = '0%'; sstat.textContent = '对方离开，发送已中断'; }
-  if (recvCtx) { try { if (recvCtx.writable) recvCtx.writable.abort(); } catch (e) {} recvCtx = null; rlist.innerHTML = ''; rbar.style.width = '0%'; rstat.textContent = '对方离开，接收已中断'; }
-  refreshSendBtn();
+/* ---------------- 设备卡片 UI ---------------- */
+function buildCard(pr) {
+  var root = document.createElement('div'); root.className = 'device';
+  var head = document.createElement('div'); head.className = 'dev-head';
+  var nm = document.createElement('span'); nm.className = 'dev-name';
+  var cn = document.createElement('span'); cn.className = 'dev-conn';
+  head.appendChild(nm); head.appendChild(cn);
+  var panes = document.createElement('div'); panes.className = 'panes';
+  // 发送
+  var sp = document.createElement('div'); sp.className = 'pane'; sp.innerHTML = '<h3>📤 发送</h3>';
+  var file = document.createElement('input'); file.type = 'file';
+  var btn = document.createElement('button'); btn.textContent = '发送'; btn.disabled = true;
+  var sw = document.createElement('div'); sw.className = 'barwrap'; var sb = document.createElement('div'); sb.className = 'pbar'; sw.appendChild(sb);
+  var ss = document.createElement('div'); ss.className = 'substat';
+  sp.appendChild(file); sp.appendChild(btn); sp.appendChild(sw); sp.appendChild(ss);
+  // 接收
+  var rp = document.createElement('div'); rp.className = 'pane'; rp.innerHTML = '<h3>📥 接收</h3>';
+  var rl = document.createElement('div');
+  var rw = document.createElement('div'); rw.className = 'barwrap'; var rb = document.createElement('div'); rb.className = 'pbar'; rw.appendChild(rb);
+  var rs = document.createElement('div'); rs.className = 'substat';
+  rp.appendChild(rl); rp.appendChild(rw); rp.appendChild(rs);
+  panes.appendChild(sp); panes.appendChild(rp);
+  root.appendChild(head); root.appendChild(panes);
+  pr.els = { root: root, name: nm, conn: cn, file: file, btn: btn, sbar: sb, sstat: ss, rlist: rl, rbar: rb, rstat: rs };
+  file.onchange = function() { refreshSendBtn(pr); };
+  btn.onclick = function() { startSend(pr); };
+  setName(pr); setConn(pr, '连接中…', '');
 }
+function setName(pr) { if (pr.els) pr.els.name.textContent = pr.name || '未命名设备'; }
+function setConn(pr, text, cls) { if (pr.els) { pr.els.conn.textContent = text; pr.els.conn.className = 'dev-conn' + (cls ? ' ' + cls : ''); } }
+function refreshSendBtn(pr) { if (pr.els) pr.els.btn.disabled = !(pr.els.file.files.length && pr.ready && !pr.sendCtx); }
 
-/* ---------------- 发送侧 ---------------- */
-fileEl.onchange = refreshSendBtn;
-sendBtn.onclick = function() {
-  var f = fileEl.files[0];
-  if (!f || sendCtx || !peerOnline) return;
-  sendCtx = { file: f, tid: crypto.randomUUID(), sent: 0, acked: 0, offset: 0, eof: false, t0: 0, pumping: false, rerun: false };
-  sendBtn.disabled = true; fileEl.disabled = true;
-  sbar.style.width = '0%';
-  sstat.textContent = '已请求发送 ' + f.name + '，等待对方确认接收...';
-  sendMsg(JSON.stringify({ type: 'rmeta', tid: sendCtx.tid, name: f.name, size: f.size, mime: f.type || 'application/octet-stream' }));
-};
+/* ---------------- 发送（每设备；通道无关：webrtc=DataChannel / relay=配对 WS） ---------------- */
+function chOpen(pr) { return pr.transport === 'relay' ? (pr.relayWs && pr.relayWs.readyState === 1) : (pr.dc && pr.dc.readyState === 'open'); }
+function chBuffered(pr) { var b = pr.transport === 'relay' ? (pr.relayWs && pr.relayWs.bufferedAmount) : (pr.dc && pr.dc.bufferedAmount); return b || 0; }
+function pSend(pr, data) { if (pr.transport === 'relay') { if (pr.relayWs && pr.relayWs.readyState === 1) pr.relayWs.send(data); } else if (pr.dc && pr.dc.readyState === 'open') pr.dc.send(data); }
+function pctrl(pr, obj) { pSend(pr, JSON.stringify(obj)); }
 
-function onReady(m) {
-  if (!sendCtx || m.tid !== sendCtx.tid) return;
-  sendCtx.t0 = Date.now();
-  sstat.textContent = '开始发送...';
-  pumpSend();
+function startSend(pr) {
+  var f = pr.els.file.files[0];
+  if (!f || pr.sendCtx || !pr.ready) return;
+  pr.sendCtx = { file: f, tid: uuid(), sent: 0, acked: 0, offset: 0, eof: false, t0: 0, pumping: false, rerun: false };
+  pr.els.btn.disabled = true; pr.els.file.disabled = true; pr.els.sbar.style.width = '0%';
+  pr.els.sstat.textContent = '已请求发送 ' + f.name + '，等待对方确认接收…';
+  pctrl(pr, { type: 'rmeta', tid: pr.sendCtx.tid, name: f.name, size: f.size, mime: f.type || 'application/octet-stream' });
 }
-function onAck(m) { if (sendCtx && m.tid === sendCtx.tid) { sendCtx.acked = m.bytes; pumpSend(); } }
-
-async function pumpSend() {
-  var c = sendCtx;
-  if (!c) return;
+function onReady(pr, m) { var c = pr.sendCtx; if (!c || m.tid !== c.tid) return; c.t0 = Date.now(); pr.els.sstat.textContent = '开始发送…'; pumpSend(pr); }
+function onAck(pr, m) { var c = pr.sendCtx; if (c && m.tid === c.tid) { c.acked = m.bytes; pumpSend(pr); } }
+async function pumpSend(pr) {
+  var c = pr.sendCtx; if (!c) return;
   if (c.pumping) { c.rerun = true; return; }
   c.pumping = true;
   do {
     c.rerun = false;
-    while (c.offset < c.file.size && (c.sent - c.acked) < WINDOW && (transport !== 'webrtc' || !dc || dc.bufferedAmount < WINDOW)) {
-      var end = Math.min(c.offset + CHUNK, c.file.size);
+    while (c.offset < c.file.size && (c.sent - c.acked) < WINDOW && chBuffered(pr) < WINDOW) {
+      var end = Math.min(c.offset + pr.chunk, c.file.size);
       var buf = await c.file.slice(c.offset, end).arrayBuffer();
-      if (!sendCtx || sendCtx.tid !== c.tid) { c.pumping = false; return; } // 期间被重置
-      sendMsg(buf);
-      c.sent += buf.byteLength; c.offset = end;
-      sendProg();
+      if (pr.sendCtx !== c || !chOpen(pr)) { c.pumping = false; return; }
+      pSend(pr, buf); c.sent += buf.byteLength; c.offset = end; sendProg(pr);
     }
   } while (c.rerun);
   c.pumping = false;
-  if (c.offset >= c.file.size && !c.eof) { c.eof = true; sendMsg(JSON.stringify({ type: 'reof', tid: c.tid })); }
+  if (c.offset >= c.file.size && !c.eof) { c.eof = true; pctrl(pr, { type: 'reof', tid: c.tid }); }
 }
-
-function sendProg() {
-  var c = sendCtx; if (!c) return;
+function sendProg(pr) {
+  var c = pr.sendCtx; if (!c) return;
   var pct = c.file.size ? Math.floor(c.sent * 100 / c.file.size) : 0;
-  sbar.style.width = pct + '%';
+  pr.els.sbar.style.width = pct + '%';
   var sec = (Date.now() - c.t0) / 1000, sp = sec > 0 ? c.sent / sec : 0;
-  sstat.textContent = '发送中 ' + pct + '%  ' + fmt(c.sent) + ' / ' + fmt(c.file.size) + '  (' + fmt(sp) + '/s)';
+  pr.els.sstat.textContent = '发送中 ' + pct + '%  ' + fmt(c.sent) + ' / ' + fmt(c.file.size) + '  (' + fmt(sp) + '/s)';
+}
+function onSendDone(pr, m) {
+  var c = pr.sendCtx; if (!c || m.tid !== c.tid) return;
+  pr.els.sbar.style.width = '100%';
+  pr.els.sstat.textContent = '已发送完成 ✓  ' + c.file.name;
+  pr.sendCtx = null; pr.els.file.disabled = false; pr.els.file.value = ''; refreshSendBtn(pr);
 }
 
-function onSendDone(m) {
-  if (!sendCtx || m.tid !== sendCtx.tid) return;
-  var name = sendCtx.file.name;
-  sbar.style.width = '100%';
-  sstat.textContent = '已发送完成 ✓  ' + name;
-  sendCtx = null;
-  fileEl.disabled = false; fileEl.value = '';
-  refreshSendBtn();
+/* ---------------- 接收（每设备） ---------------- */
+function onCtrl(pr, m) {
+  switch (m.type) {
+    case 'rmeta': startRecv(pr, m); break;
+    case 'rready': onReady(pr, m); break;
+    case 'rack': onAck(pr, m); break;
+    case 'reof': onRecvEof(pr, m); break;
+    case 'rdone': onSendDone(pr, m); break;
+  }
 }
-
-/* ---------------- 接收侧 ---------------- */
-function startRecv(m) {
-  if (recvCtx) return;   // 串行：对端一次只发一个，忽略意外并发
-  recvCtx = { tid: m.tid, meta: m, writable: null, useMem: false, chunks: [], writeChain: Promise.resolve(), received: 0, written: 0, lastAck: 0, t0: 0, finalizing: false };
-  rbar.style.width = '0%';
-  rlist.innerHTML = '';
+function startRecv(pr, m) {
+  if (pr.recvCtx) return;       // 串行：对端一次发一个
+  pr.recvCtx = { tid: m.tid, meta: m, writable: null, useMem: false, chunks: [], writeChain: Promise.resolve(), received: 0, written: 0, lastAck: 0, t0: 0, finalizing: false };
+  pr.els.rbar.style.width = '0%'; pr.els.rlist.innerHTML = '';
   var box = document.createElement('div'); box.className = 'recvitem';
   var info = document.createElement('div'); info.innerHTML = '收到文件：' + escapeHtml(m.name) + '  (' + fmt(m.size) + ')';
-  var btn = document.createElement('button'); btn.className = 'ghost'; btn.textContent = '保存接收';
-  btn.onclick = function() { acceptRecv(btn); };
-  box.appendChild(info); box.appendChild(btn); rlist.appendChild(box);
-  rstat.textContent = '对方请求发送文件，点击「保存接收」开始';
+  var b = document.createElement('button'); b.className = 'ghost'; b.textContent = '保存接收';
+  b.onclick = function() { acceptRecv(pr, b); };
+  box.appendChild(info); box.appendChild(b); pr.els.rlist.appendChild(box);
+  pr.els.rstat.textContent = '对方请求发送文件，点击「保存接收」开始';
 }
-
-async function acceptRecv(btn) {
-  var c = recvCtx; if (!c) return;
-  btn.disabled = true;
+async function acceptRecv(pr, b) {
+  var c = pr.recvCtx; if (!c) return;
+  b.disabled = true;
   if (window.showSaveFilePicker) {
     try { var h = await showSaveFilePicker({ suggestedName: c.meta.name }); c.writable = await h.createWritable(); }
-    catch (e) { if (e && e.name === 'AbortError') { btn.disabled = false; return; } c.useMem = true; }
+    catch (e) { if (e && e.name === 'AbortError') { b.disabled = false; return; } c.useMem = true; }
   } else { c.useMem = true; }
   c.t0 = Date.now();
-  sendMsg(JSON.stringify({ type: 'rready', tid: c.tid }));
-  rstat.textContent = c.useMem ? '内存接收中(大文件慎用)...' : '接收中...';
+  pctrl(pr, { type: 'rready', tid: c.tid });
+  pr.els.rstat.textContent = c.useMem ? '内存接收中(大文件慎用)…' : '接收中…';
 }
-
-async function onRecvChunk(buf) {
-  var c = recvCtx; if (!c) return;
+async function onChunk(pr, buf) {
+  var c = pr.recvCtx; if (!c) return;
   c.received += buf.byteLength;
   var p = c.writeChain.then(function() { if (c.writable) return c.writable.write(buf); c.chunks.push(buf); });
   c.writeChain = p; await p;
-  c.written += buf.byteLength;
-  recvProg();
-  if (c.written - c.lastAck >= ACKEVERY) { c.lastAck = c.written; sendMsg(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written })); }
+  c.written += buf.byteLength; recvProg(pr);
+  if (c.written - c.lastAck >= ACKEVERY) { c.lastAck = c.written; pctrl(pr, { type: 'rack', tid: c.tid, bytes: c.written }); }
 }
-
-function recvProg() {
-  var c = recvCtx; if (!c) return;
+function recvProg(pr) {
+  var c = pr.recvCtx; if (!c) return;
   var pct = c.meta.size ? Math.floor(c.received * 100 / c.meta.size) : 0;
-  rbar.style.width = pct + '%';
+  pr.els.rbar.style.width = pct + '%';
   var sec = (Date.now() - c.t0) / 1000, sp = sec > 0 ? c.received / sec : 0;
-  rstat.textContent = '接收中 ' + pct + '%  ' + fmt(c.received) + ' / ' + fmt(c.meta.size) + '  (' + fmt(sp) + '/s)';
+  pr.els.rstat.textContent = '接收中 ' + pct + '%  ' + fmt(c.received) + ' / ' + fmt(c.meta.size) + '  (' + fmt(sp) + '/s)';
 }
-
-async function onRecvEof(m) {
-  var c = recvCtx;
-  if (!c || m.tid !== c.tid || c.finalizing) return;
-  c.finalizing = true;
-  await c.writeChain;
-  sendMsg(JSON.stringify({ type: 'rack', tid: c.tid, bytes: c.written }));
-  if (c.writable) {
-    await c.writable.close();
-  } else {
+async function onRecvEof(pr, m) {
+  var c = pr.recvCtx; if (!c || m.tid !== c.tid || c.finalizing) return;
+  c.finalizing = true; await c.writeChain;
+  pctrl(pr, { type: 'rack', tid: c.tid, bytes: c.written });
+  if (c.writable) { await c.writable.close(); }
+  else {
     var blob = new Blob(c.chunks, { type: c.meta.mime });
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a'); a.href = url; a.download = c.meta.name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(function() { URL.revokeObjectURL(url); }, 10000);
   }
-  sendMsg(JSON.stringify({ type: 'rdone', tid: c.tid }));
-  rbar.style.width = '100%';
-  rstat.textContent = '接收完成 ✓  ' + c.meta.name;
-  rlist.innerHTML = '';
-  recvCtx = null;
+  pctrl(pr, { type: 'rdone', tid: c.tid });
+  pr.els.rbar.style.width = '100%';
+  pr.els.rstat.textContent = '接收完成 ✓  ' + c.meta.name;
+  pr.els.rlist.innerHTML = ''; pr.recvCtx = null;
+}
+
+// 与某设备连接中断：放弃与它进行中的收发，恢复其卡片
+function abortPeerTransfers(pr) {
+  if (pr.sendCtx) { pr.sendCtx = null; if (pr.els) { pr.els.file.disabled = false; pr.els.sbar.style.width = '0%'; pr.els.sstat.textContent = '连接中断，发送已停止'; } }
+  if (pr.recvCtx) { try { if (pr.recvCtx.writable) pr.recvCtx.writable.abort(); } catch (e) {} pr.recvCtx = null; if (pr.els) { pr.els.rlist.innerHTML = ''; pr.els.rbar.style.width = '0%'; pr.els.rstat.textContent = '连接中断，接收已停止'; } }
+  if (pr.els) refreshSendBtn(pr);
 }
 `;
 }
