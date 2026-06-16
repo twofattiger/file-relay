@@ -901,7 +901,7 @@ function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function(c){ retur
 // 顶部：链接 / 复制 / 二维码 / 设备名
 linkEl.value = location.origin + '/m/' + pass;
 document.getElementById('rcopy').onclick = function() { linkEl.select(); if (navigator.clipboard) navigator.clipboard.writeText(linkEl.value); };
-try { new QRious({ element: document.getElementById('qr'), value: linkEl.value, size: 150 }); } catch (e) { console.error('qr fail', e); }
+try { new QRious({ element: document.getElementById('qr'), value: linkEl.value, size: 100 }); } catch (e) { console.error('qr fail', e); }
 nameEl.value = myName;
 nameEl.addEventListener('change', commitName);
 nameEl.addEventListener('blur', commitName);
