@@ -181,13 +181,15 @@ const LOGIN_HTML =
 const SENDER_HTML =
   "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>" +
   "<title>中继站 · 发送</title>" + STYLE +
+  "<script src='https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js'></script>" +
   "<div class=card><h1>📤 实时发送文件 <span id=badge class=badge></span></h1>" +
   "<input id=file type=file>" +
   "<label class=opt><input id=p2p type=checkbox checked> ⚡ 优先 P2P 直连（尝试点对点直连，否则通过服务端中继）</label>" +
   "<button id=gen disabled>生成传输链接</button>" +
   "<div id=linkbox style='display:none;margin-top:14px'>" +
   "<div class=row><input id=link type=text readonly><button id=copy class=ghost>复制</button></div>" +
-  "<div class=hint>把链接发给对方，对方打开并选择保存位置后开始实时传输（双方需保持页面打开）</div></div>" +
+  "<div style='text-align:center;margin-top:14px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>" +
+  "<div class=hint>把链接发给对方，或让对方直接扫描上方二维码，对方打开并选择保存位置后开始实时传输（双方需保持页面打开）</div></div>" +
   "<div class=barwrap><div id=bar></div></div>" +
   "<div id=status></div></div>" +
   "<script>" + SENDER_JS() + "</script>";
@@ -239,6 +241,15 @@ genEl.onclick = function() {
   linkEl.value = location.origin + '/r/' + id;
   linkbox.style.display = 'block';
   genEl.disabled = true; fileEl.disabled = true;
+  
+  try {
+    new QRious({
+      element: document.getElementById('qr'),
+      value: linkEl.value,
+      size: 160
+    });
+  } catch(e) { console.error('qr fail', e); }
+
   connect();
 };
 
