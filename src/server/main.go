@@ -13,11 +13,17 @@ const SESSION_TTL = 86400
 
 var (
 	port     string
+	tlsPort  string
+	certFile string
+	keyFile  string
 	password string
 )
 
 func init() {
-	flag.StringVar(&port, "port", "8080", "Server port")
+	flag.StringVar(&port, "port", "8080", "HTTP Server port")
+	flag.StringVar(&tlsPort, "tls-port", "", "HTTPS Server port (leave empty to disable)")
+	flag.StringVar(&certFile, "cert", "", "Path to SSL certificate file")
+	flag.StringVar(&keyFile, "key", "", "Path to SSL key file")
 	flag.StringVar(&password, "pwd", "", "Admin password (overrides PASSWORD env var)")
 }
 
@@ -40,11 +46,30 @@ func main() {
 	http.HandleFunc("/api/logout", handleLogout)
 	http.HandleFunc("/ws/", handleWebSocket)
 
-	addr := fmt.Sprintf(":%s", port)
-	log.Printf("Starting File Relay server on %s\n", addr)
-	if err := http.ListenAndServe(addr, nil); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	errChan := make(chan error, 2)
+
+	// 启动 HTTP 服务
+	if port != "" {
+		go func() {
+			addr := fmt.Sprintf(":%s", port)
+			log.Printf("Starting HTTP server on %s\n", addr)
+			errChan <- http.ListenAndServe(addr, nil)
+		}()
 	}
+
+	// 启动 HTTPS 服务
+	if tlsPort != "" && certFile != "" && keyFile != "" {
+		go func() {
+			addrTLS := fmt.Sprintf(":%s", tlsPort)
+			log.Printf("Starting HTTPS server on %s\n", addrTLS)
+			errChan <- http.ListenAndServeTLS(addrTLS, certFile, keyFile, nil)
+		}()
+	} else if tlsPort != "" {
+		log.Println("WARNING: tls-port is set but cert or key is missing. HTTPS server will not start.")
+	}
+
+	// 阻塞等待任意一个服务退出
+	log.Fatalf("Server stopped: %v", <-errChan)
 }
 
 // TODO: Authentication
