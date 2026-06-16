@@ -803,8 +803,30 @@ var myName = loadName();
 
 function uuid() { return crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2); }
 function roomCid() { var k = 'room-cid-' + pass; try { var v = sessionStorage.getItem(k); if (!v) { v = uuid(); sessionStorage.setItem(k, v); } return v; } catch (e) { return uuid(); } }
-function loadName() { try { return localStorage.getItem('room-name') || ''; } catch (e) { return ''; } }
+// 名字优先级：用户手动设置(localStorage) > 本会话默认名(sessionStorage，刷新保持一致) > 现取设备名
+function loadName() {
+  try { var saved = localStorage.getItem('room-name'); if (saved) return saved; } catch (e) {}
+  try { var sk = 'room-name-default', d = sessionStorage.getItem(sk); if (!d) { d = defaultName(); sessionStorage.setItem(sk, d); } return d; } catch (e) { return defaultName(); }
+}
 function saveName(n) { try { localStorage.setItem('room-name', n); } catch (e) {} }
+// 默认设备名 = 系统-浏览器-时分秒（从 UA 识别；用字符串匹配避免模板内的正则转义问题）
+function defaultName() {
+  var ua = navigator.userAgent || '';
+  function has(s) { return ua.indexOf(s) !== -1; }
+  var os = has('Android') ? 'android'
+    : (has('iPhone') || has('iPad') || has('iPod')) ? 'ios'
+    : (has('Mac OS X') || has('Macintosh')) ? 'macos'
+    : has('Windows') ? 'windows'
+    : has('CrOS') ? 'chromeos'
+    : has('Linux') ? 'linux' : 'device';
+  var br = has('Edg/') ? 'edge'
+    : (has('OPR/') || has('Opera')) ? 'opera'
+    : has('Firefox/') ? 'firefox'
+    : has('Chrome/') ? 'chrome'
+    : has('Safari/') ? 'safari' : 'browser';
+  var t = new Date(), p = function(x) { return (x < 10 ? '0' : '') + x; };
+  return os + '-' + br + '-' + p(t.getHours()) + p(t.getMinutes()) + p(t.getSeconds());
+}
 
 var nameEl = document.getElementById('rname');
 var devicesEl = document.getElementById('devices');
