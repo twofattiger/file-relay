@@ -264,9 +264,13 @@ const STYLE =
   ".card{width:100%;max-width:520px;background:#171a21;border:1px solid #262b36;border-radius:14px;padding:28px}" +
   "h1{font-size:18px;margin:0 0 18px;display:flex;align-items:center;flex-wrap:wrap;gap:8px}input,button{font-size:16px}" +
   "input[type=password],input[type=text]{width:100%;padding:11px 12px;background:#0f1115;border:1px solid #2c3340;border-radius:9px;color:#e6e6e6;margin-bottom:12px}" +
-  "input[type=file]{margin-bottom:14px}" +
-  "button{cursor:pointer;padding:11px 16px;border:0;border-radius:9px;background:#3b82f6;color:#fff;font-weight:600}" +
+  "input[type=file]{margin-bottom:14px;max-width:100%;font-size:13px;color:#9aa4b2}" +
+  "input[type=file]::file-selector-button{cursor:pointer;margin-right:10px;padding:7px 12px;border:1px solid #2c3340;border-radius:8px;background:#262b36;color:#e6e6e6;font-size:13px;font-weight:600}" +
+  "input[type=file]::file-selector-button:hover{border-color:#3b82f6;background:#2c3340}" +
+  "button{cursor:pointer;padding:8px 14px;border:0;border-radius:8px;background:#3b82f6;color:#fff;font-weight:600;font-size:14px}" +
+  "button:not(:disabled):hover{background:#2f74e6}" +
   "button:disabled{opacity:.4;cursor:not-allowed}button.ghost{background:#262b36}" +
+  "button.ghost:not(:disabled):hover{background:#2c3340}" +
   ".row{display:flex;gap:8px}.row input{flex:1;margin-bottom:0}" +
   "#status{margin-top:16px;font-size:14px;color:#9aa4b2;min-height:56px;white-space:pre-line;line-height:1.7}" +
   ".barwrap{height:8px;background:#0f1115;border-radius:6px;overflow:hidden;margin-top:14px;border:1px solid #2c3340}" +
