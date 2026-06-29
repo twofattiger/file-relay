@@ -35,9 +35,12 @@ func handleRoom(w http.ResponseWriter, r *http.Request) {
 	servePage(w, r, ROOM_CREATE_HTML)
 }
 
-// "/m/{密码}"：方式2 房间互传
+// "/m/{密码}"：方式2 房间互传。
+// 始终返回页面（临时口令在 #hash 里、服务端看不到，鉴权由前端+WS 完成）；
+// 把"本次请求是否已登录"注入页面：无 #口令且未登录时，前端走原登录逻辑。
 func handleRoomPage(w http.ResponseWriter, r *http.Request) {
-	servePage(w, r, getRoomHTML())
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Write([]byte(getRoomHTML(isAuthed(r))))
 }
 
 // "/r/{id}"：方式1 接收（匿名）
