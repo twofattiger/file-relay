@@ -101,19 +101,25 @@ const CHOICE_HTML = `<!doctype html><meta charset=utf-8><meta name=viewport cont
 const ROOM_CREATE_HTML = `<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>` +
 	`<title>中继站 · 设备互传</title>` + STYLE +
 	`<div class=card><h1>🔁 设备互传 · 创建房间 <a class=back href='/'>返回</a></h1>` +
-	`<div class=hint style='margin-bottom:14px'>设置一个房间密码（默认取当前时间的分秒，方便另一台设备手动输入加入）。链接形如 域名/m/密码。</div>` +
+	`<div class=hint style='margin-bottom:14px'>设置一个房间密码（默认取当前时间的分秒，方便另一台设备手动输入加入）。生成的链接会自动附带一段随机免密口令（#后面部分），其它设备打开该链接即可免登录加入。</div>` +
 	`<input id=pass type=text inputmode=numeric maxlength=8 placeholder='房间密码'>` +
 	`<button id=create>生成房间</button></div>` +
 	`<script>` +
 	`var passEl=document.getElementById('pass'),createEl=document.getElementById('create');` +
 	`var d=new Date();passEl.value=String(d.getMinutes()).padStart(2,'0')+String(d.getSeconds()).padStart(2,'0');` +
-	`function go(){var v=(passEl.value||'').trim();if(!v)return;location.href='/m/'+encodeURIComponent(v);}` +
+	`function randPwd(){try{var a=new Uint8Array(6);crypto.getRandomValues(a);return Array.prototype.map.call(a,function(x){return (x%36).toString(36);}).join('');}catch(e){return Math.random().toString(36).slice(2,8);}}` +
+	`function go(){var v=(passEl.value||'').trim();if(!v)return;location.href='/m/'+encodeURIComponent(v)+'#'+randPwd();}` +
 	`createEl.onclick=go;passEl.addEventListener('keydown',function(e){if(e.key==='Enter')go();});` +
 	`passEl.focus();passEl.select();` +
 	`</script>`
 
-// 方式2 · 房间互传页：顶部二维码/链接，下方每设备一张卡片（卡内左发右收），双向、可多次
-func getRoomHTML() string {
+// 方式2 · 房间互传页：顶部二维码/链接，下方每设备一张卡片（卡内左发右收），双向、可多次。
+// 页面始终返回；把"本次请求是否已系统登录"注入 SYS_AUTHED，供前端在无 #免密口令时回退到登录逻辑。
+func getRoomHTML(authed bool) string {
+	sysAuthed := "false"
+	if authed {
+		sysAuthed = "true"
+	}
 	return `<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no'>` +
 		`<title>中继站 · 设备互传</title>` + STYLE +
 		`<script src='https://cdnjs.cloudflare.com/ajax/libs/qrious/4.0.2/qrious.min.js'></script>` +
@@ -121,10 +127,10 @@ func getRoomHTML() string {
 		`<div class=roomtop>` +
 		`<div class=row><input id=rlink type=text readonly><button id=rcopy class=ghost>复制</button></div>` +
 		`<div style='text-align:center;margin-top:12px'><canvas id=qr style='background:#fff;padding:8px;border-radius:8px'></canvas></div>` +
-		`<div class=hint>让其它设备扫码，或在浏览器直接输入此链接（域名/m/密码）加入；对方同样需先登录系统密码。每加入一台设备会在下方出现一张卡片，可与其双向互发文件。</div></div>` +
+		`<div class=hint>让其它设备扫码，或直接打开此链接加入（链接含免密口令，无需再登录系统密码）。每加入一台设备会在下方出现一张卡片，可与其双向互发文件。</div></div>` +
 		`<div id=devices></div>` +
 		`<div id=status></div></div>` + MODAL_HTML +
-		`<script>` + getRoomJS() + `</script>`
+		`<script>var SYS_AUTHED=` + sysAuthed + `;` + getRoomJS() + `</script>`
 }
 
 func getSenderHTML() string {
@@ -618,6 +624,9 @@ var pass = location.pathname.split('/')[2] || '';
 var id = pass, cid = roomCid();
 var ws = null, myPid = null, peers = {};   // pid -> Peer
 var myName = loadName();
+// 免密口令：放在分享链接 #hash 里（不会发给服务端），连 WS 时作为 pwd 参数带上换取免登录加入
+var tempPwd = ''; try { tempPwd = decodeURIComponent((location.hash || '').replace(/^#/, '')); } catch (e) { tempPwd = (location.hash || '').replace(/^#/, ''); }
+var isOwner = false, destroyed = false;   // isOwner：本端是否系统登录(房主，可销毁)；destroyed：房间已被销毁
 
 function uuid() { return crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random().toString(16).slice(2); }
 function roomCid() { var k = 'room-cid-' + pass; try { var v = sessionStorage.getItem(k); if (!v) { v = uuid(); sessionStorage.setItem(k, v); } return v; } catch (e) { return uuid(); } }
@@ -654,10 +663,11 @@ var stat = document.getElementById('status');
 function S(s) { stat.textContent = s; }
 function escapeHtml(s) { return String(s).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
 
-// 顶部：链接 / 复制 / 二维码 / 设备名
-linkEl.value = location.origin + '/m/' + pass;
+// 顶部：链接 / 复制 / 二维码 / 设备名（分享链接带上 #免密口令，对方扫码/打开即可免登录加入）
+var shareUrl = location.origin + '/m/' + pass + (tempPwd ? ('#' + encodeURIComponent(tempPwd)) : '');
+linkEl.value = shareUrl;
 document.getElementById('rcopy').onclick = function() { linkEl.select(); if (navigator.clipboard) navigator.clipboard.writeText(linkEl.value); };
-try { new QRious({ element: document.getElementById('qr'), value: linkEl.value, size: 100 }); } catch (e) { console.error('qr fail', e); }
+try { new QRious({ element: document.getElementById('qr'), value: shareUrl, size: 100 }); } catch (e) { console.error('qr fail', e); }
 nameEl.value = myName;
 nameEl.addEventListener('change', commitName);
 nameEl.addEventListener('blur', commitName);
@@ -668,22 +678,65 @@ function commitName() {                       // 失焦/回车提交，变化才
   if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'rename', name: myName }));
 }
 
-renderEmpty();
-connect();
+// 房主点「返回」时弹窗询问是否销毁房间（普通成员/已销毁则直接离开）
+var backEl = document.querySelector('h1 a.back');
+if (backEl) backEl.addEventListener('click', function(e) {
+  if (!isOwner || destroyed) return;          // 非房主：保持默认（直接离开）
+  e.preventDefault();
+  if (!mdl) { if (confirm('销毁房间？\n确定 = 销毁并移出所有成员；取消 = 仅自己离开')) destroyAndLeave(); else location.href = '/'; return; }
+  mmsg.innerHTML = '你是房主，确定离开吗？<br><br>「销毁房间」会移出所有成员并清除房间（防止他人继续使用）；「仅我离开」则其他成员可继续互传。';
+  myes.textContent = '销毁房间'; mno.textContent = '仅我离开';
+  myes.onclick = function() { mdl.style.display = 'none'; destroyAndLeave(); };
+  mno.onclick = function() { mdl.style.display = 'none'; location.href = '/'; };
+  mdl.onclick = function(ev) { if (ev.target === mdl) mdl.style.display = 'none'; };   // 点遮罩 = 留在房间
+  mdl.style.display = 'flex';
+});
+function destroyAndLeave() {
+  try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'destroy' })); } catch (e) {}
+  setTimeout(function() { location.href = '/'; }, 150);
+}
+function onRoomDestroyed() {
+  destroyed = true;
+  try { Object.keys(peers).forEach(removePeer); } catch (e) {}
+  devicesEl.innerHTML = '';
+  S('房间已被房主关闭，所有成员已退出。');
+}
+// 无免密口令且未登录系统 → 走原登录逻辑（内联登录，成功后 reload 回到本页）
+function showLoginGate() {
+  var card = document.querySelector('.card');
+  card.innerHTML = "<h1>🔐 输入系统密码</h1>" +
+    "<input id=pw type=password placeholder='密码' autofocus>" +
+    "<button id=go>进入</button><div id=lst style='margin-top:12px;color:#9aa4b2;font-size:14px'></div>" +
+    "<div class=hint>此房间链接未包含免密口令，需登录系统密码后进入。</div>";
+  var pw = document.getElementById('pw'), go = document.getElementById('go'), lst = document.getElementById('lst');
+  function login() {
+    go.disabled = true; lst.textContent = '验证中...';
+    fetch('/api/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw.value }) })
+      .then(function(r) { return r.json(); })
+      .then(function(d) { if (d.ok) { location.reload(); } else { lst.textContent = d.error || '失败'; go.disabled = false; } })
+      .catch(function() { lst.textContent = '网络错误'; go.disabled = false; });
+  }
+  go.onclick = login; pw.addEventListener('keydown', function(e) { if (e.key === 'Enter') login(); });
+}
+
+if (!tempPwd && !SYS_AUTHED) { showLoginGate(); }
+else { renderEmpty(); connect(); }
 
 function connect() {
   var p = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(p + '://' + location.host + '/ws/' + id + '?role=peer&cid=' + encodeURIComponent(cid));
+  ws = new WebSocket(p + '://' + location.host + '/ws/' + id + '?role=peer&cid=' + encodeURIComponent(cid) + (tempPwd ? '&pwd=' + encodeURIComponent(tempPwd) : ''));
   ws.binaryType = 'arraybuffer';
   ws.onopen = function() { S('已进入房间「' + pass + '」，等待其它设备加入…'); };
   ws.onerror = function() { S('连接错误'); };
-  ws.onclose = function() { S('与服务器断开，请刷新重连'); };
+  ws.onclose = function() { if (!destroyed) S('与服务器断开，请刷新重连'); };
   ws.onmessage = function(ev) {
     if (typeof ev.data !== 'string') return;   // 主会话只走信令，不传文件
     var m = JSON.parse(ev.data);
-    if (m.type === 'self') { myPid = m.pid; if (myName) ws.send(JSON.stringify({ type: 'rename', name: myName })); }
+    if (m.type === 'self') { myPid = m.pid; isOwner = !!m.owner; if (myName) ws.send(JSON.stringify({ type: 'rename', name: myName })); }
     else if (m.type === 'roster') updateRoster(m.peers);
     else if (m.type === 'signal') handleSignal(m.from, m.data);
+    else if (m.type === 'destroyed') onRoomDestroyed();
+    else if (m.type === 'error') { S('无法进入房间：' + (m.message || '')); }
   };
 }
 
@@ -827,7 +880,7 @@ function connectRelay(pr) {
   if (pr.relayWs) return;
   setConn(pr, '中继连接中…', '');
   var p = location.protocol === 'https:' ? 'wss' : 'ws';
-  var w = pr.relayWs = new WebSocket(p + '://' + location.host + '/ws/' + encodeURIComponent(relayId(pr)) + '?role=relay&cid=' + encodeURIComponent(cid));
+  var w = pr.relayWs = new WebSocket(p + '://' + location.host + '/ws/' + encodeURIComponent(relayId(pr)) + '?role=relay&cid=' + encodeURIComponent(cid) + (tempPwd ? '&pwd=' + encodeURIComponent(tempPwd) + '&room=' + encodeURIComponent(pass) : ''));
   w.binaryType = 'arraybuffer';
   w.onerror = function() {};
   w.onclose = function() { if (pr.relayWs === w) { pr.relayWs = null; if (pr.transport === 'relay') { pr.ready = false; refreshSendBtn(pr); } } };
